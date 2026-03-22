@@ -42,6 +42,7 @@ SELECT
   pb.grand_total,
   pb.rounded_grand_total,
   pb.round_off_enabled,
+  pb.bill_type,
   COALESCE(pp.paid_amount, 0) AS paid_amount,
   CASE
     WHEN COALESCE(pp.paid_amount,0) >= pb.grand_total AND pb.grand_total > 0 THEN 'Paid'
