@@ -17,6 +17,7 @@ $invoiceDate  = trim($data["invoiceDate"]  ?? "");
 $customerType = trim($data["customerType"] ?? "Retail");
 $customerName = trim($data["customerName"] ?? "Cash");
 $phone        = trim($data["phone"]        ?? "");
+$customerGstin = trim($data["customerGstin"] ?? "");
 $rows         = $data["rows"]     ?? [];
 $payments     = $data["payments"] ?? [];
 $totals       = $data["totals"]   ?? [];
@@ -36,6 +37,28 @@ $roundedFinalTotal = floatval($totals["roundedFinalTotal"] ?? 0);
 $roundOffDiff      = floatval($totals["roundOffDiff"]      ?? 0);
 $received          = floatval($totals["received"]          ?? 0);
 $balance           = floatval($totals["balance"]           ?? 0);
+$createdBy         = intval($data["createdBy"] ?? 0);
+
+// New-bill guard: customer name and phone number are always required.
+$trimmedName = trim($customerName);
+$isCashName = $trimmedName === "" || preg_match('/^cash( sale)?$/i', $trimmedName);
+if ($isCashName) {
+  http_response_code(400);
+  echo json_encode(["status"=>"error","message"=>"Customer name is required"]);
+  exit;
+}
+if (trim($phone) === "") {
+  http_response_code(400);
+  echo json_encode(["status"=>"error","message"=>"Customer phone number is required"]);
+  exit;
+}
+// Phone format guard: if a phone is provided, it must be exactly 10 digits.
+$phoneDigits = preg_replace('/\D/', '', (string)$phone);
+if ($phoneDigits !== "" && strlen($phoneDigits) !== 10) {
+  http_response_code(400);
+  echo json_encode(["status"=>"error","message"=>"Phone number must be 10 digits"]);
+  exit;
+}
 
 // Check if inventory table exists
 $invExists = $conn->query("SHOW TABLES LIKE 'inventory'")->num_rows > 0;
@@ -43,22 +66,52 @@ $invExists = $conn->query("SHOW TABLES LIKE 'inventory'")->num_rows > 0;
 $conn->begin_transaction();
 
 try {
-  // 1) Insert invoice header
-  $stmt = $conn->prepare("
-    INSERT INTO invoices
-      (invoice_no, invoice_date, customer_type, customer_name, phone,
-       subtotal, bill_discount, bill_discount_value, final_total,
-       round_off_enabled, rounded_final_total, round_off_diff, received, balance)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-  ");
-  $stmt->bind_param("ssssssssdsddds",
-    $invoiceNo, $invoiceDate, $customerType, $customerName, $phone,
-    $subtotal, $billDiscount, $billDiscountValue, $finalTotal,
-    $roundOffEnabled, $roundedFinalTotal, $roundOffDiff, $received, $balance
-  );
-  if (!$stmt->execute()) throw new Exception("Failed to insert invoice: " . $stmt->error);
-  $invoiceId = $conn->insert_id;
-  $stmt->close();
+  // 1) Insert invoice header — with auto-retry on duplicate auto-numbered invoice.
+  //    If two terminals open AddSales at the same time, both pre-fetch the same
+  //    next number; whichever saves second hits the UNIQUE key. We auto-bump
+  //    here so the user doesn't see a duplicate error for system-generated
+  //    plain-numeric invoice numbers. Custom numbers (anything not purely numeric)
+  //    still surface the duplicate error so the user can correct it.
+  $isAutoFormat = (bool) preg_match('/^[0-9]+$/', $invoiceNo);
+  $maxRetries = $isAutoFormat ? 32 : 1;
+  $invoiceId = 0;
+  $lastErr = "";
+  for ($attempt = 0; $attempt < $maxRetries; $attempt++) {
+    $stmt = $conn->prepare("
+      INSERT INTO invoices
+        (invoice_no, invoice_date, customer_type, customer_name, phone, customer_gstin,
+         subtotal, bill_discount, bill_discount_value, final_total,
+         round_off_enabled, rounded_final_total, round_off_diff, received, balance, created_by)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+    ");
+    $stmt->bind_param("sssssssssdsdddsi",
+      $invoiceNo, $invoiceDate, $customerType, $customerName, $phone, $customerGstin,
+      $subtotal, $billDiscount, $billDiscountValue, $finalTotal,
+      $roundOffEnabled, $roundedFinalTotal, $roundOffDiff, $received, $balance, $createdBy
+    );
+    // PHP 8.x mysqli throws mysqli_sql_exception on error instead of returning
+    // false — so we must catch it, not check the return value.
+    try {
+      $stmt->execute();
+      $invoiceId = $conn->insert_id;
+      $stmt->close();
+      break; // success
+    } catch (mysqli_sql_exception $e) {
+      $errno = $e->getCode();
+      $lastErr = $e->getMessage();
+      $stmt->close();
+      // 1062 = ER_DUP_ENTRY. Anything else, fail immediately.
+      if ($errno !== 1062 || !$isAutoFormat) {
+        throw new Exception("Failed to insert invoice: " . $lastErr);
+      }
+      // Bump by +1 and retry. UNIQUE INDEX check on INSERT is real-time
+      // (not snapshot-based), so a +1 walk is guaranteed to find the next free slot.
+      $invoiceNo = (string) (intval($invoiceNo) + 1);
+    }
+  }
+  if ($invoiceId === 0) {
+    throw new Exception("Could not allocate a unique invoice number after $maxRetries retries: " . $lastErr);
+  }
 
   // 2) Insert items + deduct inventory
   $stmtItem = $conn->prepare("

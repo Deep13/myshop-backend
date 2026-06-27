@@ -11,8 +11,16 @@ include "db.php";
 $id = isset($_GET["id"]) ? intval($_GET["id"]) : 0;
 if ($id <= 0) { http_response_code(400); echo json_encode(["status"=>"error","message"=>"Missing id"]); exit; }
 
-// invoice header
-$stmt = $conn->prepare("SELECT * FROM invoices WHERE id=? LIMIT 1");
+// invoice header (join users so we can show "last updated by")
+$stmt = $conn->prepare("
+  SELECT i.*,
+         uc.name AS created_by_name,
+         uu.name AS updated_by_name
+  FROM invoices i
+  LEFT JOIN users uc ON uc.id = i.created_by
+  LEFT JOIN users uu ON uu.id = i.updated_by
+  WHERE i.id = ? LIMIT 1
+");
 $stmt->bind_param("i", $id);
 $stmt->execute();
 $invRes = $stmt->get_result();

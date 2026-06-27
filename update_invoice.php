@@ -17,6 +17,7 @@ $invoiceDate  = trim($data["invoiceDate"]    ?? "");
 $customerType = trim($data["customerType"]   ?? "Retail");
 $customerName = trim($data["customerName"]   ?? "");
 $phone        = trim($data["phone"]          ?? "");
+$customerGstin = trim($data["customerGstin"] ?? "");
 $rows         = $data["rows"]     ?? [];
 $payments     = $data["payments"] ?? [];
 $totals       = $data["totals"]   ?? [];
@@ -36,53 +37,71 @@ $roundOffDiff      = floatval($totals["roundOffDiff"]      ?? 0);
 $received          = floatval($totals["received"]          ?? 0);
 $balance           = floatval($totals["balance"]           ?? 0);
 
+// Credit-sale guard: balance > 0 means money is owed → need a real customer + phone.
+if ($balance > 0.01) {
+  $isCashName = $customerName === "" || preg_match('/^cash( sale)?$/i', $customerName);
+  if ($isCashName) {
+    http_response_code(400);
+    echo json_encode(["status"=>"error","message"=>"Credit sales need a customer name (cannot be saved as Cash)"]);
+    exit;
+  }
+  if (trim($phone) === "") {
+    http_response_code(400);
+    echo json_encode(["status"=>"error","message"=>"Credit sales need a customer phone number"]);
+    exit;
+  }
+}
+// Phone format guard: if a phone is provided, it must be exactly 10 digits.
+$phoneDigits = preg_replace('/\D/', '', (string)$phone);
+if ($phoneDigits !== "" && strlen($phoneDigits) !== 10) {
+  http_response_code(400);
+  echo json_encode(["status"=>"error","message"=>"Phone number must be 10 digits"]);
+  exit;
+}
+
 $invExists = $conn->query("SHOW TABLES LIKE 'inventory'")->num_rows > 0;
 
 $conn->begin_transaction();
 
 try {
-  // 1) Restore old inventory quantities (add back what was previously sold)
+  // 1) Snapshot the old line items keyed by (item_id, batch_no) so we can
+  //    apply the NET delta to inventory at the end (instead of restore-then-deduct,
+  //    which touched every row regardless of change).
+  $oldByKey = []; // key = item_id|batch_no => qty
   if ($invExists) {
-    $stmtOldItems = $conn->prepare("SELECT ii.item_code, ii.batch_no, ii.qty FROM invoice_items ii WHERE ii.invoice_id = ?");
-    // invoice_items might not have item_code — join via item_name match or store code
-    // Safe fallback: match by batch_no only if item_code is stored, else skip restore
-    $stmtOldItems = $conn->prepare("SELECT item_name, batch_no, qty FROM invoice_items WHERE invoice_id = ?");
+    // Resolve item_id from item_code when the stored item_id is NULL
+    $stmtOldItems = $conn->prepare("SELECT COALESCE(item_id, 0) AS item_id, COALESCE(item_code,'') AS item_code, COALESCE(batch_no,'') AS batch_no, qty FROM invoice_items WHERE invoice_id = ?");
     $stmtOldItems->bind_param("i", $id);
     $stmtOldItems->execute();
     $oldItemsRes = $stmtOldItems->get_result();
-
-    $stmtRestore = $conn->prepare("
-      UPDATE inventory inv
-      JOIN items it ON it.id = inv.item_id
-      SET inv.current_qty = inv.current_qty + ?
-      WHERE it.name = ? AND inv.batch_no = ?
-      LIMIT 1
-    ");
-
+    $codeLookup = $conn->prepare("SELECT id FROM items WHERE code = ? LIMIT 1");
     while ($oldRow = $oldItemsRes->fetch_assoc()) {
-      $oldQty = floatval($oldRow["qty"]);
-      $oldName = $oldRow["item_name"];
-      $oldBatch = $oldRow["batch_no"] ?? "";
-      if ($oldQty > 0 && $oldBatch !== "") {
-        $stmtRestore->bind_param("dss", $oldQty, $oldName, $oldBatch);
-        $stmtRestore->execute();
+      $iid = intval($oldRow["item_id"]);
+      if ($iid === 0 && $oldRow["item_code"] !== "") {
+        $codeLookup->bind_param("s", $oldRow["item_code"]);
+        $codeLookup->execute();
+        $rl = $codeLookup->get_result();
+        if ($rl->num_rows > 0) $iid = intval($rl->fetch_assoc()["id"]);
       }
+      if ($iid <= 0) continue;
+      $key = $iid . "|" . $oldRow["batch_no"];
+      $oldByKey[$key] = ($oldByKey[$key] ?? 0) + floatval($oldRow["qty"]);
     }
     $stmtOldItems->close();
-    $stmtRestore->close();
+    $codeLookup->close();
   }
 
   // 2) Update invoice header
   $stmt = $conn->prepare("
     UPDATE invoices SET
-      invoice_no=?, invoice_date=?, customer_type=?, customer_name=?, phone=?,
+      invoice_no=?, invoice_date=?, customer_type=?, customer_name=?, phone=?, customer_gstin=?,
       subtotal=?, bill_discount=?, bill_discount_value=?, final_total=?,
       round_off_enabled=?, rounded_final_total=?, round_off_diff=?,
       received=?, balance=?, updated_by=?
     WHERE id=?
   ");
-  $stmt->bind_param("sssssdsddiddddii",
-    $invoiceNo, $invoiceDate, $customerType, $customerName, $phone,
+  $stmt->bind_param("ssssssdsddiddddii",
+    $invoiceNo, $invoiceDate, $customerType, $customerName, $phone, $customerGstin,
     $subtotal, $billDiscount, $billDiscountValue, $finalTotal,
     $roundOffEnabled, $roundedFinalTotal, $roundOffDiff,
     $received, $balance, $updatedBy, $id
@@ -103,13 +122,9 @@ try {
     VALUES (?,NULLIF(?,0),?,?,?,?,?,?,?,?,?,?,?,?)
   ");
 
-  $stmtDeduct = null;
-  if ($invExists) {
-    $stmtDeduct = $conn->prepare("
-      UPDATE inventory SET current_qty = GREATEST(current_qty - ?, 0)
-      WHERE item_id = ? AND batch_no = ? LIMIT 1
-    ");
-  }
+  // We no longer deduct in the per-item loop. Instead we collect the new qtys per
+  // (item_id, batch_no) and apply only the NET delta vs the old snapshot at the end.
+  $newByKey = []; // key = item_id|batch_no => qty
 
   foreach ($rows as $r) {
     $itemName = trim($r["itemName"] ?? ""); if ($itemName === "") continue;
@@ -153,14 +168,29 @@ try {
     );
     if (!$stmtItem->execute()) throw new Exception("Insert item failed: " . $stmtItem->error);
 
-    // Deduct new quantities from inventory
-    if ($invExists && $stmtDeduct && $itemId2 > 0 && $qty > 0) {
-      $stmtDeduct->bind_param("dis", $qty, $itemId2, $batchNo);
-      $stmtDeduct->execute();
+    // Accumulate the new qty for net-delta application below
+    if ($invExists && $itemId2 > 0 && $qty > 0) {
+      $key = $itemId2 . "|" . $batchNo;
+      $newByKey[$key] = ($newByKey[$key] ?? 0) + $qty;
     }
   }
   $stmtItem->close();
-  if ($stmtDeduct) $stmtDeduct->close();
+
+  // Apply net delta to inventory — touches only the batches whose qty actually changed.
+  // delta > 0 means more sold than before → deduct; delta < 0 means restore.
+  if ($invExists) {
+    $allKeys = array_unique(array_merge(array_keys($oldByKey), array_keys($newByKey)));
+    $stmtAdj = $conn->prepare("UPDATE inventory SET current_qty = GREATEST(current_qty - ?, 0) WHERE item_id = ? AND batch_no = ? LIMIT 1");
+    foreach ($allKeys as $key) {
+      $delta = ($newByKey[$key] ?? 0) - ($oldByKey[$key] ?? 0);
+      if (abs($delta) < 0.0001) continue; // unchanged batch — leave inventory alone
+      [$iidStr, $batch] = explode("|", $key, 2);
+      $iid = intval($iidStr);
+      $stmtAdj->bind_param("dis", $delta, $iid, $batch);
+      $stmtAdj->execute();
+    }
+    $stmtAdj->close();
+  }
 
   // 5) Replace payments
   $stmtDelPay = $conn->prepare("DELETE FROM invoice_payments WHERE invoice_id=?");

@@ -22,6 +22,7 @@ $billNo            = strv($body["billNo"] ?? "");
 $billDate          = strv($body["billDate"] ?? "");
 $dueDate           = nullIfEmpty($body["dueDate"] ?? "");
 $billType          = strv($body["billType"] ?? "GST");
+$gstMode           = strv($body["gstMode"] ?? "exclusive");
 $rows              = $body["rows"] ?? [];
 $payments          = $body["payments"] ?? [];
 $subTotal          = num($body["totals"]["subTotal"] ?? 0);
@@ -55,6 +56,18 @@ if ($resD->num_rows === 0) { http_response_code(400); echo json_encode(["status"
 $dist = $resD->fetch_assoc(); $stmtD->close();
 $distributorName = $dist["name"]; $gstin = $dist["gstin"] ?? "";
 
+// Duplicate-bill guard — same distributor + same bill_no on a different purchase row
+$stmtDup = $conn->prepare("SELECT id FROM purchase_bills WHERE distributor_id=? AND bill_no=? AND id<>? LIMIT 1");
+$stmtDup->bind_param("isi", $distributorId, $billNo, $purchaseId);
+$stmtDup->execute();
+if ($stmtDup->get_result()->num_rows > 0) {
+  $stmtDup->close();
+  http_response_code(409);
+  echo json_encode(["status"=>"error","message"=>"Bill no '$billNo' already exists for this distributor"]);
+  exit;
+}
+$stmtDup->close();
+
 $conn->begin_transaction();
 try {
   // 1) Update header
@@ -62,16 +75,29 @@ try {
     UPDATE purchase_bills SET
       distributor_id=?,distributor_name=?,distributor_gstin=?,bill_no=?,bill_date=?,due_date=?,
       sub_total=?,tax_total=?,grand_total=?,round_off_enabled=?,round_off_diff=?,rounded_grand_total=?,
-      bill_type=?,updated_by=?,updated_at=NOW()
+      bill_type=?,gst_mode=?,updated_by=?,updated_at=NOW()
     WHERE id=?
   ");
-  $stmtH->bind_param("isssssdddiddisi", $distributorId,$distributorName,$gstin,$billNo,$billDate,$dueDate,$subTotal,$taxTotal,$grandTotal,$roundOffEnabled,$roundOffDiff,$roundedGrandTotal,$billType,$updatedBy,$purchaseId);
+  $stmtH->bind_param("isssssdddiddssii", $distributorId,$distributorName,$gstin,$billNo,$billDate,$dueDate,$subTotal,$taxTotal,$grandTotal,$roundOffEnabled,$roundOffDiff,$roundedGrandTotal,$billType,$gstMode,$updatedBy,$purchaseId);
   if (!$stmtH->execute()) throw new Exception("Update header failed: ".$stmtH->error);
   $stmtH->close();
 
-  // 2) Remove old inventory entries for this purchase
+  // 2) Capture how much of each existing batch has already been SOLD,
+  //    so we can preserve that figure when re-inserting the inventory rows.
   $invExists = $conn->query("SHOW TABLES LIKE 'inventory'")->num_rows > 0;
+  $soldByKey = [];          // key = item_id|batch_no => sold_qty
   if ($invExists) {
+    $stmtOld = $conn->prepare("SELECT item_id, COALESCE(batch_no,'') AS batch_no, initial_qty, current_qty FROM inventory WHERE purchase_bill_id=?");
+    $stmtOld->bind_param("i", $purchaseId);
+    $stmtOld->execute();
+    $resOld = $stmtOld->get_result();
+    while ($row = $resOld->fetch_assoc()) {
+      $key = intval($row["item_id"]) . "|" . $row["batch_no"];
+      $soldByKey[$key] = floatval($row["initial_qty"]) - floatval($row["current_qty"]);
+    }
+    $stmtOld->close();
+
+    // Now safe to clear the rows — sold qty is captured in $soldByKey
     $stmtDelInv = $conn->prepare("DELETE FROM inventory WHERE purchase_bill_id=?");
     $stmtDelInv->bind_param("i", $purchaseId);
     $stmtDelInv->execute(); $stmtDelInv->close();
@@ -86,8 +112,8 @@ try {
   $stmtFindItem = $conn->prepare("SELECT id FROM items WHERE code=? LIMIT 1");
   $stmtLine = $conn->prepare("
     INSERT INTO purchase_bill_items
-      (purchase_id,item_id,item_name,item_code,hsn,batch_no,exp_date,mrp,qty,purchase_price,sale_price,discount,tax_pct,amount,gst_flag)
-    VALUES (?,NULLIF(?,0),?,?,?,?,?,?,?,?,?,?,?,?,?)
+      (purchase_id,item_id,item_name,item_code,hsn,batch_no,exp_date,mrp,qty,free_qty,purchase_price,sale_price,discount,tax_pct,amount,gst_flag)
+    VALUES (?,NULLIF(?,0),?,?,?,?,?,?,?,?,?,?,?,?,?,?)
   ");
 
   $stmtInv = null;
@@ -103,7 +129,8 @@ try {
     $itemName = strv($r["itemName"] ?? ""); if ($itemName === "") continue;
     $itemCode = strv($r["code"] ?? ""); $hsn=strv($r["hsn"]??""); $batchNo=strv($r["batchNo"]??"");
     $expDate=nullIfEmpty($r["expDate"]??""); $discount=strv($r["discount"]??"");
-    $mrp=num($r["mrp"]??0); $qty=num($r["qty"]??0); $purchasePrice=num($r["purchasePrice"]??0);
+    $mrp=num($r["mrp"]??0); $qty=num($r["qty"]??0); $freeQty=num($r["freeQty"]??0);
+    $stockQty=$qty+$freeQty; $purchasePrice=num($r["purchasePrice"]??0);
     $salePrice=num($r["salePrice"]??0); $taxPct=num($r["tax"]??0); $amount=num($r["amount"]??0);
     if ($qty <= 0) continue;
 
@@ -115,11 +142,15 @@ try {
     }
     if ($itemId === 0) throw new Exception("Item '".$itemName."' not found in item master.");
 
-    $stmtLine->bind_param("iisssssddddsddi",$purchaseId,$itemId,$itemName,$itemCode,$hsn,$batchNo,$expDate,$mrp,$qty,$purchasePrice,$salePrice,$discount,$taxPct,$amount,$gstFlag);
+    $stmtLine->bind_param("iisssssdddddsddi",$purchaseId,$itemId,$itemName,$itemCode,$hsn,$batchNo,$expDate,$mrp,$qty,$freeQty,$purchasePrice,$salePrice,$discount,$taxPct,$amount,$gstFlag);
     if (!$stmtLine->execute()) throw new Exception("Insert item failed: ".$stmtLine->error);
 
     if ($stmtInv) {
-      $stmtInv->bind_param("iissddddidd",$itemId,$purchaseId,$batchNo,$expDate,$mrp,$purchasePrice,$salePrice,$taxPct,$gstFlag,$qty,$qty);
+      // Preserve already-sold qty for this batch so we don't reset stock back to full.
+      $key = $itemId . "|" . $batchNo;
+      $sold = isset($soldByKey[$key]) ? $soldByKey[$key] : 0;
+      $newCurrent = max(0, $stockQty - $sold);
+      $stmtInv->bind_param("iissddddidd",$itemId,$purchaseId,$batchNo,$expDate,$mrp,$purchasePrice,$salePrice,$taxPct,$gstFlag,$stockQty,$newCurrent);
       if (!$stmtInv->execute()) throw new Exception("Inventory update failed: ".$stmtInv->error);
     }
   }

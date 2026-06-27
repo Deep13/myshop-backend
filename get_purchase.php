@@ -20,28 +20,34 @@ if ($purchaseId <= 0) {
   exit;
 }
 
-// 1) Header
+// 1) Header (join users so we can show "last updated by")
 $stmtH = $conn->prepare("
   SELECT
-    id,
-    distributor_id,
-    distributor_name,
-    distributor_gstin,
-    bill_no,
-    bill_date,
-    due_date,
-    sub_total,
-    tax_total,
-    grand_total,
-    round_off_enabled,
-    round_off_diff,
-    rounded_grand_total,
-    created_by,
-    updated_by,
-    created_at,
-    updated_at
-  FROM purchase_bills
-  WHERE id=?
+    pb.id,
+    pb.distributor_id,
+    pb.distributor_name,
+    pb.distributor_gstin,
+    pb.bill_no,
+    pb.bill_date,
+    pb.due_date,
+    pb.sub_total,
+    pb.tax_total,
+    pb.grand_total,
+    pb.round_off_enabled,
+    pb.round_off_diff,
+    pb.rounded_grand_total,
+    pb.bill_type,
+    pb.gst_mode,
+    pb.created_by,
+    pb.updated_by,
+    pb.created_at,
+    pb.updated_at,
+    uc.name AS created_by_name,
+    uu.name AS updated_by_name
+  FROM purchase_bills pb
+  LEFT JOIN users uc ON uc.id = pb.created_by
+  LEFT JOIN users uu ON uu.id = pb.updated_by
+  WHERE pb.id=?
   LIMIT 1
 ");
 $stmtH->bind_param("i", $purchaseId);
@@ -70,6 +76,7 @@ $stmtI = $conn->prepare("
     exp_date,
     mrp,
     qty,
+    COALESCE(free_qty, 0) AS free_qty,
     purchase_price,
     sale_price,
     discount,

@@ -45,24 +45,32 @@ $sql = "
     it.name         AS item_name,
     it.code         AS item_code,
     it.hsn,
+    it.category     AS category,
+    it.pack_size,
+    it.bag_sale_price,
     inv.batch_no,
     inv.exp_date,
     inv.mrp,
     inv.purchase_price,
-    inv.sale_price,
-    inv.tax_pct,
+    CASE WHEN inv.sale_price > 0 THEN inv.sale_price ELSE it.sale_price END AS sale_price,
+    CASE WHEN inv.tax_pct > 0 THEN inv.tax_pct ELSE it.tax_pct END AS tax_pct,
     inv.gst_flag,
     inv.current_qty,
     inv.purchase_bill_id,
     pb.bill_no      AS purchase_bill_no,
     pb.bill_date    AS purchase_bill_date,
+    pb.bill_type    AS purchase_bill_type,
+    pb.gst_mode     AS purchase_gst_mode,
+    inv.updated_at  AS updated_at,
+    uu.name         AS updated_by_name,
     CASE WHEN inv.exp_date IS NOT NULL AND inv.exp_date < '$today' THEN 1 ELSE 0 END AS is_expired
   FROM inventory inv
   JOIN items it ON it.id = inv.item_id
   LEFT JOIN purchase_bills pb ON pb.id = inv.purchase_bill_id
+  LEFT JOIN users uu ON uu.id = inv.updated_by
   $whereSql
   ORDER BY inv.current_qty DESC, inv.exp_date ASC, it.name ASC
-  LIMIT 500
+  LIMIT 10000
 ";
 
 if (count($params) > 0) {
@@ -81,6 +89,8 @@ while ($row = $res->fetch_assoc()) {
   $row["purchase_price"] = floatval($row["purchase_price"]);
   $row["sale_price"]     = floatval($row["sale_price"]);
   $row["tax_pct"]        = floatval($row["tax_pct"]);
+  $row["pack_size"]      = $row["pack_size"]      !== null ? floatval($row["pack_size"])      : null;
+  $row["bag_sale_price"] = $row["bag_sale_price"] !== null ? floatval($row["bag_sale_price"]) : null;
   $row["is_expired"]     = intval($row["is_expired"]);
   $data[] = $row;
 }
