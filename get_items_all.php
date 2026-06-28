@@ -8,15 +8,15 @@ if ($_SERVER["REQUEST_METHOD"] === "OPTIONS") { http_response_code(200); exit; }
 include "db.php";
 
 $q     = trim($_GET["q"] ?? "");
-$limit = intval($_GET["limit"] ?? 200);
-if ($limit <= 0 || $limit > 500) $limit = 200;
+$limit = intval($_GET["limit"] ?? 10000);
+if ($limit <= 0 || $limit > 10000) $limit = 10000;
 
 if ($q !== "") {
   $like  = "%" . $q . "%";
-  $stmt  = $conn->prepare("SELECT id,name,code,hsn,mrp,sale_price,purchase_price,tax_pct,is_primary FROM items WHERE name LIKE ? OR code LIKE ? OR hsn LIKE ? ORDER BY name ASC LIMIT ?");
+  $stmt  = $conn->prepare("SELECT id,name,code,hsn,category,mrp,sale_price,pack_size,bag_sale_price,purchase_price,tax_pct,is_primary FROM items WHERE name LIKE ? OR code LIKE ? OR hsn LIKE ? ORDER BY name ASC LIMIT ?");
   $stmt->bind_param("sssi", $like, $like, $like, $limit);
 } else {
-  $stmt = $conn->prepare("SELECT id,name,code,hsn,mrp,sale_price,purchase_price,tax_pct,is_primary FROM items ORDER BY name ASC LIMIT ?");
+  $stmt = $conn->prepare("SELECT id,name,code,hsn,category,mrp,sale_price,pack_size,bag_sale_price,purchase_price,tax_pct,is_primary FROM items ORDER BY name ASC LIMIT ?");
   $stmt->bind_param("i", $limit);
 }
 
@@ -29,8 +29,11 @@ while ($row = $res->fetch_assoc()) {
     "name"          => $row["name"],
     "code"          => $row["code"],
     "hsn"           => $row["hsn"] ?? "",
+    "category"      => $row["category"] ?? "",
     "mrp"           => floatval($row["mrp"]),
     "salePrice"     => floatval($row["sale_price"]),
+    "packSize"      => $row["pack_size"]      !== null ? floatval($row["pack_size"])      : null,
+    "bagSalePrice"  => $row["bag_sale_price"] !== null ? floatval($row["bag_sale_price"]) : null,
     "purchasePrice" => floatval($row["purchase_price"]),
     "tax"           => floatval($row["tax_pct"]),
     "is_primary"    => intval($row["is_primary"]),

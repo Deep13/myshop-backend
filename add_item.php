@@ -30,10 +30,15 @@ if (!$body) { http_response_code(400); echo json_encode(["status"=>"error","mess
 $name = strv($body["name"] ?? "");
 $code = strv($body["code"] ?? "");
 $hsn  = strv($body["hsn"] ?? "");
+$category = strv($body["category"] ?? "");
 $mrp  = num($body["mrp"] ?? 0);
 $salePrice = num($body["salePrice"] ?? 0);
 $purchasePrice = num($body["purchasePrice"] ?? 0);
 $tax  = num($body["tax"] ?? 0);
+$packSize     = isset($body["packSize"])     ? num($body["packSize"])     : null;
+$bagSalePrice = isset($body["bagSalePrice"]) ? num($body["bagSalePrice"]) : null;
+if ($packSize !== null && $packSize <= 0)         $packSize = null;
+if ($bagSalePrice !== null && $bagSalePrice <= 0) $bagSalePrice = null;
 $is_primary = !empty($body["is_primary"]) ? 1 : 0;
 
 if ($name === "" || $code === "") {
@@ -58,11 +63,12 @@ if ($resC->num_rows > 0) {
 $stmtC->close();
 
 $stmt = $conn->prepare("
-  INSERT INTO items (name, code, hsn, mrp, sale_price, purchase_price, tax_pct, is_primary)
-  VALUES (?,?,?,?,?,?,?,?)
+  INSERT INTO items (name, code, hsn, category, mrp, sale_price, pack_size, bag_sale_price, purchase_price, tax_pct, is_primary)
+  VALUES (?,?,?,?,?,?,?,?,?,?,?)
 ");
 
-$stmt->bind_param("sssdddii", $name, $code, $hsn, $mrp, $salePrice, $purchasePrice, $tax, $is_primary);
+// nullable doubles passed via mysqli need bind_param to handle NULL correctly: bind to vars (allowed via "d")
+$stmt->bind_param("ssssddddddi", $name, $code, $hsn, $category, $mrp, $salePrice, $packSize, $bagSalePrice, $purchasePrice, $tax, $is_primary);
 
 if (!$stmt->execute()) {
   http_response_code(500);
@@ -81,8 +87,11 @@ echo json_encode([
     "name" => $name,
     "code" => $code,
     "hsn" => $hsn,
+    "category" => $category,
     "mrp" => $mrp,
     "salePrice" => $salePrice,
+    "packSize" => $packSize,
+    "bagSalePrice" => $bagSalePrice,
     "purchasePrice" => $purchasePrice,
     "tax" => $tax,
     "is_primary" => $is_primary

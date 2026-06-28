@@ -31,10 +31,15 @@ $id   = intval($body["id"] ?? 0);
 $name = strv($body["name"] ?? "");
 $code = strv($body["code"] ?? "");
 $hsn  = strv($body["hsn"] ?? "");
+$category = strv($body["category"] ?? "");
 $mrp  = num($body["mrp"] ?? 0);
 $salePrice = num($body["salePrice"] ?? 0);
 $purchasePrice = num($body["purchasePrice"] ?? 0);
 $tax  = num($body["tax"] ?? 0);
+$packSize     = isset($body["packSize"])     ? num($body["packSize"])     : null;
+$bagSalePrice = isset($body["bagSalePrice"]) ? num($body["bagSalePrice"]) : null;
+if ($packSize !== null && $packSize <= 0)         $packSize = null;
+if ($bagSalePrice !== null && $bagSalePrice <= 0) $bagSalePrice = null;
 $is_primary = !empty($body["is_primary"]) ? 1 : 0;
 
 if ($id <= 0) {
@@ -63,10 +68,10 @@ if ($stmtC->get_result()->num_rows > 0) {
 $stmtC->close();
 
 $stmt = $conn->prepare("
-  UPDATE items SET name=?, code=?, hsn=?, mrp=?, sale_price=?, purchase_price=?, tax_pct=?, is_primary=?
+  UPDATE items SET name=?, code=?, hsn=?, category=?, mrp=?, sale_price=?, pack_size=?, bag_sale_price=?, purchase_price=?, tax_pct=?, is_primary=?
   WHERE id=?
 ");
-$stmt->bind_param("sssdddiii", $name, $code, $hsn, $mrp, $salePrice, $purchasePrice, $tax, $is_primary, $id);
+$stmt->bind_param("ssssddddddii", $name, $code, $hsn, $category, $mrp, $salePrice, $packSize, $bagSalePrice, $purchasePrice, $tax, $is_primary, $id);
 
 if (!$stmt->execute()) {
   http_response_code(500);
@@ -79,8 +84,8 @@ echo json_encode([
   "status" => "success",
   "message" => "Item updated",
   "data" => [
-    "id" => $id, "name" => $name, "code" => $code, "hsn" => $hsn,
-    "mrp" => $mrp, "salePrice" => $salePrice, "purchasePrice" => $purchasePrice,
-    "tax" => $tax, "is_primary" => $is_primary,
+    "id" => $id, "name" => $name, "code" => $code, "hsn" => $hsn, "category" => $category,
+    "mrp" => $mrp, "salePrice" => $salePrice, "packSize" => $packSize, "bagSalePrice" => $bagSalePrice,
+    "purchasePrice" => $purchasePrice, "tax" => $tax, "is_primary" => $is_primary,
   ]
 ]);

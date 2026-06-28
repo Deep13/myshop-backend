@@ -12,24 +12,18 @@ if ($_SERVER["REQUEST_METHOD"] === "OPTIONS") {
 
 include "db.php";
 
-// Get latest invoice number
-$sql = "SELECT invoice_no FROM invoices ORDER BY id DESC LIMIT 1";
+// Next invoice number = max(numeric invoice_no) + 1. Plain number, no prefix.
+$sql = "SELECT MAX(CAST(invoice_no AS UNSIGNED)) AS max_no FROM invoices WHERE invoice_no REGEXP '^[0-9]+$'";
 $result = $conn->query($sql);
 
-$nextInvoiceNo = "INV001"; // default
-
+$nextNum = 2842; // default starting point if table is empty
 if ($result && $result->num_rows > 0) {
   $row = $result->fetch_assoc();
-  $lastInvoice = $row["invoice_no"]; // e.g. INV023
-
-  // Extract numeric part
-  if (preg_match("/(\d+)$/", $lastInvoice, $m)) {
-    $num = intval($m[1]) + 1;
-    $nextInvoiceNo = "INV" . str_pad($num, 3, "0", STR_PAD_LEFT);
-  }
+  $maxNo = intval($row["max_no"] ?? 0);
+  if ($maxNo > 0) $nextNum = $maxNo + 1;
 }
 
 echo json_encode([
   "status" => "success",
-  "invoiceNo" => $nextInvoiceNo
+  "invoiceNo" => (string) $nextNum
 ]);

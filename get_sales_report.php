@@ -191,6 +191,8 @@ if ($type === "" || $type === "summary") {
     SELECT COUNT(*) AS total_bills,
            COALESCE(SUM(rounded_final_total), 0) AS total_revenue,
            COALESCE(AVG(rounded_final_total), 0) AS avg_bill_value,
+           COALESCE(SUM(GREATEST(rounded_final_total - balance, 0)), 0) AS total_received,
+           COALESCE(SUM(GREATEST(balance, 0)), 0) AS total_due,
            COUNT(DISTINCT customer_name) AS unique_customers
     FROM invoices
     WHERE invoice_date BETWEEN ? AND ?
@@ -215,6 +217,8 @@ if ($type === "" || $type === "summary") {
   $result["summary"] = [
     "total_bills"       => intval($r["total_bills"]),
     "total_revenue"     => floatval($r["total_revenue"]),
+    "total_received"    => floatval($r["total_received"]),
+    "total_due"         => floatval($r["total_due"]),
     "avg_bill_value"    => round(floatval($r["avg_bill_value"]), 2),
     "unique_customers"  => intval($r["unique_customers"]),
     "total_qty_sold"    => floatval($ri["total_qty_sold"]),

@@ -20,6 +20,7 @@ $billNo            = strv($body["billNo"] ?? "");
 $billDate          = strv($body["billDate"] ?? "");
 $dueDate           = nullIfEmpty($body["dueDate"] ?? "");
 $billType          = strv($body["billType"] ?? "GST"); // GST | NON-GST
+$gstMode           = strv($body["gstMode"] ?? "exclusive"); // exclusive | inclusive
 $rows              = $body["rows"] ?? null;
 $subTotal          = num($body["totals"]["subTotal"] ?? 0);
 $taxTotal          = num($body["totals"]["taxTotal"] ?? 0);
@@ -48,6 +49,18 @@ $stmtD->close();
 $distributorName  = $dist["name"];
 $distributorGstin = $dist["gstin"] ?? null;
 
+// Duplicate-bill guard — same distributor + same bill_no is not allowed
+$stmtDup = $conn->prepare("SELECT id FROM purchase_bills WHERE distributor_id=? AND bill_no=? LIMIT 1");
+$stmtDup->bind_param("is", $distributorId, $billNo);
+$stmtDup->execute();
+if ($stmtDup->get_result()->num_rows > 0) {
+  $stmtDup->close();
+  http_response_code(409);
+  echo json_encode(["status"=>"error","message"=>"Bill no '$billNo' already exists for this distributor"]);
+  exit;
+}
+$stmtDup->close();
+
 $conn->begin_transaction();
 try {
   // 1) Insert purchase header
@@ -55,21 +68,31 @@ try {
     INSERT INTO purchase_bills
       (distributor_id, distributor_name, distributor_gstin, bill_no, bill_date, due_date,
        sub_total, tax_total, grand_total, round_off_enabled, round_off_diff, rounded_grand_total,
-       bill_type, created_by)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+       bill_type, gst_mode, created_by)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
   ");
-  $stmtH->bind_param("isssssdddiddsi", $distributorId,$distributorName,$distributorGstin,$billNo,$billDate,$dueDate,$subTotal,$taxTotal,$grandTotal,$roundOffEnabled,$roundOffDiff,$roundedGrandTotal,$billType,$createdBy);
+  $stmtH->bind_param("isssssdddiddssi", $distributorId,$distributorName,$distributorGstin,$billNo,$billDate,$dueDate,$subTotal,$taxTotal,$grandTotal,$roundOffEnabled,$roundOffDiff,$roundedGrandTotal,$billType,$gstMode,$createdBy);
   if (!$stmtH->execute()) throw new Exception("Insert header failed: ".$stmtH->error);
   $purchaseId = $stmtH->insert_id;
   $stmtH->close();
 
   // 2) Insert items + update inventory
-  $stmtFindItem = $conn->prepare("SELECT id FROM items WHERE code=? LIMIT 1");
+  $stmtFindItem = $conn->prepare("SELECT id, category, pack_size FROM items WHERE code=? LIMIT 1");
+  // For Rice items, refresh the items master with latest computed prices.
+  // Formula matches frontend (AddPurchase/AddSales/ItemDetail):
+  //   sale_price (per kg) = ⌈(pp + delivery) / pack + kgMarkup⌉
+  //   bag_sale_price       = ⌈pp + delivery + bagMarkup⌉
+  //   mrp (per bag)        = sale_price × pack_size
+  $stmtUpdateMaster = $conn->prepare("UPDATE items SET sale_price=?, bag_sale_price=?, mrp=?, purchase_price=? WHERE id=? LIMIT 1");
+  $DELIVERY = 13; $KG_MARKUP = 5; $BAG_MARKUP = 50;
+  // Add free_qty column if not exists
+  $conn->query("ALTER TABLE purchase_bill_items ADD COLUMN IF NOT EXISTS free_qty DECIMAL(12,2) NOT NULL DEFAULT 0 AFTER qty");
+
   $stmtLine = $conn->prepare("
     INSERT INTO purchase_bill_items
       (purchase_id, item_id, item_name, item_code, hsn, batch_no, exp_date,
-       mrp, qty, purchase_price, sale_price, discount, tax_pct, amount, gst_flag)
-    VALUES (?, NULLIF(?,0), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       mrp, qty, free_qty, purchase_price, sale_price, discount, tax_pct, amount, gst_flag)
+    VALUES (?, NULLIF(?,0), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   ");
   $stmtInv = $conn->prepare("
     INSERT INTO inventory
@@ -93,19 +116,26 @@ try {
     $discount      = strv($r["discount"] ?? "");
     $mrp           = num($r["mrp"] ?? 0);
     $qty           = num($r["qty"] ?? 0);
+    $freeQty       = num($r["freeQty"] ?? 0);
+    $stockQty      = $qty + $freeQty; // total units to add to inventory
     $purchasePrice = num($r["purchasePrice"] ?? 0);
     $salePrice     = num($r["salePrice"] ?? 0);
     $taxPct        = num($r["tax"] ?? 0);
-    $amount        = num($r["amount"] ?? 0);
+    $amount        = num($r["amount"] ?? 0); // based on qty only, excludes free
     if ($qty <= 0) continue;
 
     // Validate item exists in master (item_id required)
-    $itemId = 0;
+    $itemId = 0; $itemCategory = ""; $itemPackSize = 0;
     if ($itemCode !== "") {
       $stmtFindItem->bind_param("s", $itemCode);
       $stmtFindItem->execute();
       $resItem = $stmtFindItem->get_result();
-      if ($resItem && $resItem->num_rows > 0) $itemId = intval($resItem->fetch_assoc()["id"]);
+      if ($resItem && $resItem->num_rows > 0) {
+        $itemRow = $resItem->fetch_assoc();
+        $itemId       = intval($itemRow["id"]);
+        $itemCategory = (string) ($itemRow["category"] ?? "");
+        $itemPackSize = floatval($itemRow["pack_size"] ?? 0);
+      }
     }
     if ($itemId === 0) throw new Exception("Item '".$itemName."' not found in item master. All items must be from master.");
 
@@ -113,22 +143,32 @@ try {
     // 15 params: i i s s s s s d d d d s d d i
     // purchase_id, item_id, item_name, item_code, hsn, batch_no, exp_date,
     // mrp, qty, purchase_price, sale_price, discount, tax_pct, amount, gst_flag
-    $stmtLine->bind_param("iisssssddddsddi",
+    $stmtLine->bind_param("iisssssdddddsddi",
       $purchaseId,$itemId,$itemName,$itemCode,$hsn,$batchNo,$expDate,
-      $mrp,$qty,$purchasePrice,$salePrice,$discount,$taxPct,$amount,$gstFlag
+      $mrp,$qty,$freeQty,$purchasePrice,$salePrice,$discount,$taxPct,$amount,$gstFlag
     );
     if (!$stmtLine->execute()) throw new Exception("Insert item failed: ".$stmtLine->error);
 
-    // Upsert inventory
+    // Upsert inventory (stockQty = qty + freeQty)
     $stmtInv->bind_param("iissddddidd",
-      $itemId,$purchaseId,$batchNo,$expDate,$mrp,$purchasePrice,$salePrice,$taxPct,$gstFlag,$qty,$qty
+      $itemId,$purchaseId,$batchNo,$expDate,$mrp,$purchasePrice,$salePrice,$taxPct,$gstFlag,$stockQty,$stockQty
     );
     if (!$stmtInv->execute()) throw new Exception("Inventory update failed: ".$stmtInv->error);
+
+    // For Rice items, refresh the items master with the latest computed prices.
+    if (preg_match('/^Rice\b/i', $itemCategory) && $itemPackSize > 0 && $purchasePrice > 0) {
+      $newSalePerKg = ceil(($purchasePrice + $DELIVERY) / $itemPackSize + $KG_MARKUP);
+      $newBagPrice  = ceil($purchasePrice + $DELIVERY + $BAG_MARKUP);
+      $newMrpBag    = $newSalePerKg * $itemPackSize;
+      $stmtUpdateMaster->bind_param("ddddi", $newSalePerKg, $newBagPrice, $newMrpBag, $purchasePrice, $itemId);
+      $stmtUpdateMaster->execute();
+    }
   }
 
   $stmtFindItem->close();
   $stmtLine->close();
   $stmtInv->close();
+  $stmtUpdateMaster->close();
   $conn->commit();
 
   echo json_encode(["status"=>"success","message"=>"Purchase saved","purchaseId"=>$purchaseId]);

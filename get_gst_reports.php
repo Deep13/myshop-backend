@@ -26,6 +26,8 @@ if ($type === "" || $type === "gstr1") {
       i.invoice_date,
       i.customer_name,
       i.phone,
+      i.customer_gstin,
+      i.rounded_final_total AS invoice_value,
       ii.item_name,
       ii.item_code,
       ii.hsn,
@@ -58,24 +60,26 @@ if ($type === "" || $type === "gstr1") {
       $totalTax = 0; $cgst = 0; $sgst = 0;
     }
     $rows[] = [
-      "invoice_no"    => $r["invoice_no"],
-      "invoice_date"  => $r["invoice_date"],
-      "customer_name" => $r["customer_name"],
-      "phone"         => $r["phone"],
-      "item_name"     => $r["item_name"],
-      "item_code"     => $r["item_code"],
-      "hsn"           => $r["hsn"],
-      "qty"           => floatval($r["qty"]),
-      "rate"          => floatval($r["price"]),
-      "taxable_value" => $taxableValue,
-      "tax_pct"       => $taxPct,
-      "cgst_pct"      => $taxPct / 2,
-      "cgst"          => $cgst,
-      "sgst_pct"      => $taxPct / 2,
-      "sgst"          => $sgst,
-      "total_tax"     => $totalTax,
-      "total"         => $amt,
-      "gst_flag"      => $gstFlag,
+      "invoice_no"     => $r["invoice_no"],
+      "invoice_date"   => $r["invoice_date"],
+      "customer_name"  => $r["customer_name"],
+      "phone"          => $r["phone"],
+      "customer_gstin" => $r["customer_gstin"],
+      "invoice_value"  => floatval($r["invoice_value"]),
+      "item_name"      => $r["item_name"],
+      "item_code"      => $r["item_code"],
+      "hsn"            => $r["hsn"],
+      "qty"            => floatval($r["qty"]),
+      "rate"           => floatval($r["price"]),
+      "taxable_value"  => $taxableValue,
+      "tax_pct"        => $taxPct,
+      "cgst_pct"       => $taxPct / 2,
+      "cgst"           => $cgst,
+      "sgst_pct"       => $taxPct / 2,
+      "sgst"           => $sgst,
+      "total_tax"      => $totalTax,
+      "total"          => $amt,
+      "gst_flag"       => $gstFlag,
     ];
   }
   $stmt->close();
@@ -151,13 +155,12 @@ if ($type === "" || $type === "gstr2a") {
 
 // ═══ GSTR-3B: Summary return ═══
 if ($type === "" || $type === "gstr3b") {
-  // Outward (Sales)
+  // Outward (Sales). Aggregate TAX first then split evenly so CGST = SGST.
   $stmtS = $conn->prepare("
     SELECT
       SUM(ii.amount) AS total_amount,
       SUM(CASE WHEN ii.gst_flag=1 AND ii.tax>0 THEN ROUND(ii.amount * 100 / (100 + ii.tax), 2) ELSE ii.amount END) AS taxable_value,
-      SUM(CASE WHEN ii.gst_flag=1 AND ii.tax>0 THEN ROUND((ii.amount - ROUND(ii.amount * 100 / (100 + ii.tax), 2)) / 2, 2) ELSE 0 END) AS cgst,
-      SUM(CASE WHEN ii.gst_flag=1 AND ii.tax>0 THEN ROUND((ii.amount - ROUND(ii.amount * 100 / (100 + ii.tax), 2)) / 2, 2) ELSE 0 END) AS sgst
+      SUM(CASE WHEN ii.gst_flag=1 AND ii.tax>0 THEN (ii.amount - ROUND(ii.amount * 100 / (100 + ii.tax), 2)) ELSE 0 END) AS total_tax
     FROM invoice_items ii
     JOIN invoices i ON i.id = ii.invoice_id
     WHERE i.invoice_date BETWEEN ? AND ?
@@ -167,13 +170,12 @@ if ($type === "" || $type === "gstr3b") {
   $sales = $stmtS->get_result()->fetch_assoc();
   $stmtS->close();
 
-  // Inward (Purchases)
+  // Inward (Purchases). Aggregate TAX first then split evenly so CGST = SGST.
   $stmtP = $conn->prepare("
     SELECT
       SUM(pbi.amount) AS total_amount,
       SUM(pbi.amount) AS taxable_value,
-      SUM(CASE WHEN pbi.gst_flag=1 AND pbi.tax_pct>0 THEN ROUND(pbi.amount * pbi.tax_pct / 200, 2) ELSE 0 END) AS cgst,
-      SUM(CASE WHEN pbi.gst_flag=1 AND pbi.tax_pct>0 THEN ROUND(pbi.amount * pbi.tax_pct / 200, 2) ELSE 0 END) AS sgst
+      SUM(CASE WHEN pbi.gst_flag=1 AND pbi.tax_pct>0 THEN pbi.amount * pbi.tax_pct / 100 ELSE 0 END) AS total_tax
     FROM purchase_bill_items pbi
     JOIN purchase_bills pb ON pb.id = pbi.purchase_id
     WHERE pb.bill_date BETWEEN ? AND ?
@@ -183,10 +185,13 @@ if ($type === "" || $type === "gstr3b") {
   $purchase = $stmtP->get_result()->fetch_assoc();
   $stmtP->close();
 
-  $salesCGST = floatval($sales["cgst"] ?? 0);
-  $salesSGST = floatval($sales["sgst"] ?? 0);
-  $purchCGST = floatval($purchase["cgst"] ?? 0);
-  $purchSGST = floatval($purchase["sgst"] ?? 0);
+  // CGST = SGST = round(total_tax / 2). Both equal by construction.
+  $salesTax  = floatval($sales["total_tax"] ?? 0);
+  $purchTax  = floatval($purchase["total_tax"] ?? 0);
+  $salesCGST = round($salesTax / 2, 2);
+  $salesSGST = $salesCGST;
+  $purchCGST = round($purchTax / 2, 2);
+  $purchSGST = $purchCGST;
 
   $result["gstr3b"] = [
     "outward" => [
@@ -220,15 +225,15 @@ if ($type === "" || $type === "gstr3b") {
 
 // ═══ HSN-wise Summary ═══
 if ($type === "" || $type === "hsn") {
-  // Sales HSN
+  // Sales HSN. Aggregate tax per group then split CGST = SGST = round(tax/2)
+  // so the per-group sum stays clean against the actual tax_total.
   $stmtH = $conn->prepare("
     SELECT
       ii.hsn,
       ii.tax AS tax_pct,
       SUM(ii.qty) AS total_qty,
       SUM(CASE WHEN ii.gst_flag=1 AND ii.tax>0 THEN ROUND(ii.amount * 100 / (100 + ii.tax), 2) ELSE ii.amount END) AS taxable_value,
-      SUM(CASE WHEN ii.gst_flag=1 AND ii.tax>0 THEN ROUND((ii.amount - ROUND(ii.amount * 100 / (100 + ii.tax), 2)) / 2, 2) ELSE 0 END) AS cgst,
-      SUM(CASE WHEN ii.gst_flag=1 AND ii.tax>0 THEN ROUND((ii.amount - ROUND(ii.amount * 100 / (100 + ii.tax), 2)) / 2, 2) ELSE 0 END) AS sgst,
+      SUM(CASE WHEN ii.gst_flag=1 AND ii.tax>0 THEN ii.amount - ROUND(ii.amount * 100 / (100 + ii.tax), 2) ELSE 0 END) AS total_tax,
       SUM(ii.amount) AS total_value,
       COUNT(DISTINCT ii.invoice_id) AS invoice_count
     FROM invoice_items ii
@@ -242,27 +247,28 @@ if ($type === "" || $type === "hsn") {
   $res = $stmtH->get_result();
   $hsn = [];
   while ($r = $res->fetch_assoc()) {
+    $totalTax           = round(floatval($r["total_tax"] ?? 0), 2);
     $r["total_qty"]     = floatval($r["total_qty"]);
     $r["taxable_value"] = round(floatval($r["taxable_value"]), 2);
-    $r["cgst"]          = round(floatval($r["cgst"]), 2);
-    $r["sgst"]          = round(floatval($r["sgst"]), 2);
+    $r["cgst"]          = round($totalTax / 2, 2);
+    $r["sgst"]          = round($totalTax / 2, 2);
     $r["total_value"]   = round(floatval($r["total_value"]), 2);
     $r["tax_pct"]       = floatval($r["tax_pct"]);
     $r["invoice_count"] = intval($r["invoice_count"]);
+    unset($r["total_tax"]);
     $hsn[] = $r;
   }
   $stmtH->close();
   $result["hsn_sales"] = $hsn;
 
-  // Purchase HSN
+  // Purchase HSN. Aggregate tax per group then split CGST = SGST = round(tax/2).
   $stmtHP = $conn->prepare("
     SELECT
       pbi.hsn,
       pbi.tax_pct,
       SUM(pbi.qty) AS total_qty,
       SUM(pbi.amount) AS taxable_value,
-      SUM(CASE WHEN pbi.gst_flag=1 AND pbi.tax_pct>0 THEN ROUND(pbi.amount * pbi.tax_pct / 200, 2) ELSE 0 END) AS cgst,
-      SUM(CASE WHEN pbi.gst_flag=1 AND pbi.tax_pct>0 THEN ROUND(pbi.amount * pbi.tax_pct / 200, 2) ELSE 0 END) AS sgst,
+      SUM(CASE WHEN pbi.gst_flag=1 AND pbi.tax_pct>0 THEN pbi.amount * pbi.tax_pct / 100 ELSE 0 END) AS total_tax,
       COUNT(DISTINCT pbi.purchase_id) AS bill_count
     FROM purchase_bill_items pbi
     JOIN purchase_bills pb ON pb.id = pbi.purchase_id
@@ -275,12 +281,14 @@ if ($type === "" || $type === "hsn") {
   $res = $stmtHP->get_result();
   $hsnP = [];
   while ($r = $res->fetch_assoc()) {
+    $totalTax           = round(floatval($r["total_tax"] ?? 0), 2);
     $r["total_qty"]     = floatval($r["total_qty"]);
     $r["taxable_value"] = round(floatval($r["taxable_value"]), 2);
-    $r["cgst"]          = round(floatval($r["cgst"]), 2);
-    $r["sgst"]          = round(floatval($r["sgst"]), 2);
+    $r["cgst"]          = round($totalTax / 2, 2);
+    $r["sgst"]          = round($totalTax / 2, 2);
     $r["tax_pct"]       = floatval($r["tax_pct"]);
     $r["bill_count"]    = intval($r["bill_count"]);
+    unset($r["total_tax"]);
     $hsnP[] = $r;
   }
   $stmtHP->close();

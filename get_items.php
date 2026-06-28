@@ -18,7 +18,7 @@ if ($q === "") {
 
 $like = "%" . $q . "%";
 $stmt = $conn->prepare("
-  SELECT id, name, code, hsn, mrp, sale_price, purchase_price, tax_pct
+  SELECT id, name, code, hsn, category, mrp, sale_price, pack_size, bag_sale_price, purchase_price, tax_pct
   FROM items
   WHERE name LIKE ? OR code LIKE ? OR hsn LIKE ?
   ORDER BY name ASC

@@ -12,6 +12,13 @@ $yesterday = date("Y-m-d", strtotime("-1 day"));
 $d7        = date("Y-m-d", strtotime("-6 days")); // 7 days including today
 $d30       = date("Y-m-d", strtotime("-29 days"));
 
+// Optional custom date range — pass ?from=YYYY-MM-DD&to=YYYY-MM-DD
+$customFrom = isset($_GET['from']) ? trim($_GET['from']) : '';
+$customTo   = isset($_GET['to'])   ? trim($_GET['to'])   : '';
+$hasCustom  = preg_match('/^\d{4}-\d{2}-\d{2}$/', $customFrom)
+           && preg_match('/^\d{4}-\d{2}-\d{2}$/', $customTo)
+           && $customFrom <= $customTo;
+
 function salesTotal($conn, $from, $to) {
   $stmt = $conn->prepare("SELECT COALESCE(SUM(rounded_final_total),0) AS t, COUNT(*) AS c FROM invoices WHERE invoice_date BETWEEN ? AND ?");
   $stmt->bind_param("ss", $from, $to);
@@ -46,6 +53,51 @@ $result = [
   ],
 ];
 
+// Add custom period when ?from=&to= are valid
+if ($hasCustom) {
+  $result["sales"]["custom"]    = salesTotal($conn, $customFrom, $customTo);
+  $result["purchase"]["custom"] = purchaseTotal($conn, $customFrom, $customTo);
+  $result["custom_range"]       = ["from" => $customFrom, "to" => $customTo];
+}
+
+// ── Sales by payment mode
+function salesByMode($conn, $from, $to) {
+  $stmt = $conn->prepare("
+    SELECT ip.pay_type, COALESCE(SUM(ip.amount),0) AS total
+    FROM invoice_payments ip
+    JOIN invoices i ON i.id = ip.invoice_id
+    WHERE i.invoice_date BETWEEN ? AND ?
+    GROUP BY ip.pay_type
+  ");
+  $stmt->bind_param("ss", $from, $to);
+  $stmt->execute();
+  $res = $stmt->get_result();
+  $modes = [];
+  while ($r = $res->fetch_assoc()) {
+    $modes[strtolower($r["pay_type"])] = floatval($r["total"]);
+  }
+  $stmt->close();
+
+  // Credit = unpaid balance on invoices in this period (money still owed).
+  $stmtC = $conn->prepare("SELECT COALESCE(SUM(balance),0) AS credit FROM invoices WHERE invoice_date BETWEEN ? AND ? AND balance > 0");
+  $stmtC->bind_param("ss", $from, $to);
+  $stmtC->execute();
+  $modes["credit"] = floatval($stmtC->get_result()->fetch_assoc()["credit"]);
+  $stmtC->close();
+
+  return $modes;
+}
+
+$result["sales_by_mode"] = [
+  "today"     => salesByMode($conn, $today, $today),
+  "yesterday" => salesByMode($conn, $yesterday, $yesterday),
+  "days7"     => salesByMode($conn, $d7, $today),
+  "days30"    => salesByMode($conn, $d30, $today),
+];
+if ($hasCustom) {
+  $result["sales_by_mode"]["custom"] = salesByMode($conn, $customFrom, $customTo);
+}
+
 // ── Inventory numbers (from inventory table if exists)
 $invExists = $conn->query("SHOW TABLES LIKE 'inventory'")->num_rows > 0;
 if ($invExists) {
@@ -69,7 +121,7 @@ if ($invExists) {
   // Expiring in next 90 days
   $exp90 = date("Y-m-d", strtotime("+90 days"));
   $expiringR = $conn->query("
-    SELECT inv.id, it.name AS item_name, it.code AS item_code,
+    SELECT inv.id, it.id AS item_id, it.name AS item_name, it.code AS item_code,
            inv.batch_no, inv.exp_date, inv.current_qty, inv.mrp, inv.purchase_price
     FROM inventory inv
     JOIN items it ON it.id = inv.item_id
@@ -83,7 +135,7 @@ if ($invExists) {
 
   // Already expired with stock
   $expiredR = $conn->query("
-    SELECT inv.id, it.name AS item_name, it.code AS item_code,
+    SELECT inv.id, it.id AS item_id, it.name AS item_name, it.code AS item_code,
            inv.batch_no, inv.exp_date, inv.current_qty, inv.mrp, inv.purchase_price
     FROM inventory inv
     JOIN items it ON it.id = inv.item_id
@@ -94,22 +146,41 @@ if ($invExists) {
   $expired = [];
   while ($r = $expiredR->fetch_assoc()) $expired[] = $r;
   $result["expired_items"] = $expired;
+  // Low stock items (total qty per item <= limit, excluding zero)
+  $lowStockLimit = isset($_GET['low_stock_limit']) ? max(1, intval($_GET['low_stock_limit'])) : 5;
+  $lowStockR = $conn->query("
+    SELECT it.id, it.name AS item_name, it.code AS item_code,
+           SUM(inv.current_qty) AS total_qty
+    FROM inventory inv
+    JOIN items it ON it.id = inv.item_id
+    GROUP BY it.id
+    HAVING total_qty > 0 AND total_qty <= $lowStockLimit
+    ORDER BY total_qty ASC, it.name ASC
+    LIMIT 30
+  ");
+  $lowStock = [];
+  while ($r = $lowStockR->fetch_assoc()) $lowStock[] = $r;
+  $result["low_stock_items"] = $lowStock;
 } else {
   $result["inventory"] = ["stock_by_ptr"=>0,"stock_by_mrp"=>0,"expired_by_ptr"=>0,"expired_by_mrp"=>0,"total_units"=>0];
   $result["expiring_items"] = [];
   $result["expired_items"]  = [];
+  $result["low_stock_items"] = [];
 }
 
-// ── Need to Pay (purchase balance)
+// ── Need to Pay (purchase balance — grouped by distributor)
 $needPayR = $conn->query("
-  SELECT pb.id, pb.distributor_name, pb.bill_no, pb.bill_date, pb.due_date,
-         (CASE WHEN pb.round_off_enabled=1 THEN pb.rounded_grand_total ELSE pb.grand_total END) AS total,
-         COALESCE(pp.paid,0) AS paid
+  SELECT pb.distributor_name,
+         COUNT(*) AS bill_count,
+         MIN(pb.due_date) AS earliest_due,
+         SUM(CASE WHEN pb.round_off_enabled=1 THEN pb.rounded_grand_total ELSE pb.grand_total END) AS total,
+         COALESCE(SUM(pp.paid),0) AS paid
   FROM purchase_bills pb
   LEFT JOIN (SELECT purchase_id, SUM(amount) AS paid FROM purchase_payments WHERE purchase_id IS NOT NULL GROUP BY purchase_id) pp ON pp.purchase_id=pb.id
+  GROUP BY pb.distributor_name
   HAVING (total - paid) > 0.01
-  ORDER BY pb.due_date ASC, pb.bill_date ASC
-  LIMIT 20
+  ORDER BY earliest_due ASC
+  LIMIT 30
 ");
 $needPay = [];
 while ($r = $needPayR->fetch_assoc()) {
@@ -119,13 +190,17 @@ while ($r = $needPayR->fetch_assoc()) {
 $result["need_to_pay"]     = $needPay;
 $result["need_to_pay_total"] = array_sum(array_column($needPay, "balance"));
 
-// ── Need to Collect (sales balance)
+// ── Need to Collect (sales balance — grouped by customer)
 $needCollR = $conn->query("
-  SELECT id, customer_name, invoice_no, invoice_date, rounded_final_total AS total, balance
+  SELECT customer_name,
+         COUNT(*) AS invoice_count,
+         SUM(balance) AS balance,
+         MIN(invoice_date) AS earliest_date
   FROM invoices
   WHERE balance > 0.01
-  ORDER BY invoice_date ASC
-  LIMIT 20
+  GROUP BY customer_name
+  ORDER BY earliest_date ASC
+  LIMIT 30
 ");
 $needColl = [];
 while ($r = $needCollR->fetch_assoc()) $needColl[] = $r;
