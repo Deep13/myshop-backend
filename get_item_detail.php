@@ -37,6 +37,7 @@ if ($invExists) {
            pb.bill_no AS purchase_bill_no,
            pb.bill_date AS purchase_bill_date,
            pb.bill_type,
+           pb.distributor_id,
            pb.distributor_name
     FROM inventory inv
     LEFT JOIN purchase_bills pb ON pb.id = inv.purchase_bill_id
@@ -62,6 +63,7 @@ $pRes = $conn->query("
     pb.id          AS bill_id,
     pb.bill_no,
     pb.bill_date,
+    pb.distributor_id,
     pb.distributor_name,
     pb.bill_type
   FROM purchase_bill_items pbi

@@ -27,7 +27,8 @@ if ($type === "" || $type === "gstr1") {
       i.customer_name,
       i.phone,
       i.customer_gstin,
-      i.rounded_final_total AS invoice_value,
+      COALESCE((SELECT SUM(x.amount) FROM invoice_items x
+                WHERE x.invoice_id = i.id AND x.gst_flag = 1), 0) AS invoice_value,
       ii.item_name,
       ii.item_code,
       ii.hsn,
@@ -39,6 +40,7 @@ if ($type === "" || $type === "gstr1") {
     FROM invoice_items ii
     JOIN invoices i ON i.id = ii.invoice_id
     WHERE i.invoice_date BETWEEN ? AND ?
+      AND ii.gst_flag = 1
     ORDER BY i.invoice_date ASC, i.id ASC
   ");
   $stmt->bind_param("ss", $from, $to);
@@ -107,6 +109,7 @@ if ($type === "" || $type === "gstr2a") {
     FROM purchase_bill_items pbi
     JOIN purchase_bills pb ON pb.id = pbi.purchase_id
     WHERE pb.bill_date BETWEEN ? AND ?
+      AND pbi.gst_flag = 1
     ORDER BY pb.bill_date ASC, pb.id ASC
   ");
   $stmt->bind_param("ss", $from, $to);
@@ -164,6 +167,7 @@ if ($type === "" || $type === "gstr3b") {
     FROM invoice_items ii
     JOIN invoices i ON i.id = ii.invoice_id
     WHERE i.invoice_date BETWEEN ? AND ?
+      AND ii.gst_flag = 1
   ");
   $stmtS->bind_param("ss", $from, $to);
   $stmtS->execute();
@@ -179,6 +183,7 @@ if ($type === "" || $type === "gstr3b") {
     FROM purchase_bill_items pbi
     JOIN purchase_bills pb ON pb.id = pbi.purchase_id
     WHERE pb.bill_date BETWEEN ? AND ?
+      AND pbi.gst_flag = 1
   ");
   $stmtP->bind_param("ss", $from, $to);
   $stmtP->execute();
@@ -239,6 +244,7 @@ if ($type === "" || $type === "hsn") {
     FROM invoice_items ii
     JOIN invoices i ON i.id = ii.invoice_id
     WHERE i.invoice_date BETWEEN ? AND ?
+      AND ii.gst_flag = 1
     GROUP BY ii.hsn, ii.tax
     ORDER BY taxable_value DESC
   ");
@@ -273,6 +279,7 @@ if ($type === "" || $type === "hsn") {
     FROM purchase_bill_items pbi
     JOIN purchase_bills pb ON pb.id = pbi.purchase_id
     WHERE pb.bill_date BETWEEN ? AND ?
+      AND pbi.gst_flag = 1
     GROUP BY pbi.hsn, pbi.tax_pct
     ORDER BY taxable_value DESC
   ");
