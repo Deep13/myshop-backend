@@ -4,7 +4,7 @@ header("Access-Control-Allow-Origin: *");
 
 include "db.php";
 
-$sql = "SELECT id, name, role FROM users";
+$sql = "SELECT id, name, role, off_mode FROM users";
 $result = $conn->query($sql);
 
 $rows = array();

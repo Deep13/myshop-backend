@@ -63,6 +63,18 @@ try {
   $sales = $stmt->get_result()->fetch_assoc();
   $stmt->close();
 
+  // Last purchase (any batch, in or out of stock) — "when did I last buy this"
+  $stmt = $conn->prepare("
+    SELECT MAX(pb.bill_date) AS last_purchase_date
+    FROM purchase_bill_items pbi
+    JOIN purchase_bills pb ON pb.id = pbi.purchase_id
+    WHERE pbi.item_id = ? OR (pbi.item_code <> '' AND pbi.item_code = ?)
+  ");
+  $stmt->bind_param("is", $itemId, $code);
+  $stmt->execute();
+  $purch = $stmt->get_result()->fetch_assoc();
+  $stmt->close();
+
   $totalStock    = floatval($stock["total_stock"]);
   $oldestArrival = $stock["oldest_live_arrival"];
   $lastSale      = $sales["last_sale_date"];
@@ -75,6 +87,11 @@ try {
   $daysSinceLastSale = null;
   if ($lastSale) {
     $daysSinceLastSale = (int)$today->diff(new DateTime($lastSale))->format("%a");
+  }
+  $lastPurchase = $purch["last_purchase_date"] ?? null;
+  $daysSinceLastPurchase = null;
+  if ($lastPurchase) {
+    $daysSinceLastPurchase = (int)$today->diff(new DateTime($lastPurchase))->format("%a");
   }
 
   // Dead = there is stock, and it hasn't sold recently (or ever).
@@ -91,6 +108,8 @@ try {
       "days_in_stock"        => $daysInStock,
       "last_sale_date"       => $lastSale,
       "days_since_last_sale" => $daysSinceLastSale,
+      "last_purchase_date"          => $lastPurchase,
+      "days_since_last_purchase"    => $daysSinceLastPurchase,
       "qty_sold_30d"         => floatval($sales["qty_sold_30d"]),
       "is_dead"              => $isDead,
       "dead_threshold_days"  => DEAD_STOCK_DAYS,
