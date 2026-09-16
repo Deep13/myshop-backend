@@ -7,6 +7,7 @@ if ($_SERVER["REQUEST_METHOD"] === "OPTIONS") { http_response_code(200); exit; }
 if ($_SERVER["REQUEST_METHOD"] !== "POST") { http_response_code(405); echo json_encode(["status"=>"error","message"=>"Method not allowed"]); exit; }
 
 include "db.php";
+include "item_master_sync.php";
 
 function strv($v){return trim((string)($v??""));}
 function nullIfEmpty($s){$s=strv($s);return $s===""?null:$s;}
@@ -153,6 +154,9 @@ try {
       $stmtInv->bind_param("iissddddidd",$itemId,$purchaseId,$batchNo,$expDate,$mrp,$purchasePrice,$salePrice,$taxPct,$gstFlag,$stockQty,$newCurrent);
       if (!$stmtInv->execute()) throw new Exception("Inventory update failed: ".$stmtInv->error);
     }
+
+    sync_item_master($conn, $itemId, $purchaseId, $billDate, $billType, $gstMode,
+                     $mrp, $purchasePrice, $salePrice, $taxPct);
   }
 
   $stmtFindItem->close(); $stmtLine->close();

@@ -55,6 +55,10 @@ $sql = "
     CASE WHEN inv.sale_price > 0 THEN inv.sale_price ELSE it.sale_price END AS sale_price,
     CASE WHEN inv.tax_pct > 0 THEN inv.tax_pct ELSE it.tax_pct END AS tax_pct,
     inv.gst_flag,
+    it.mrp            AS master_mrp,
+    it.sale_price     AS master_sale_price,
+    it.purchase_price AS master_purchase_price,
+    it.tax_pct        AS master_tax_pct,
     inv.current_qty,
     inv.purchase_bill_id,
     pb.bill_no      AS purchase_bill_no,
@@ -89,6 +93,9 @@ while ($row = $res->fetch_assoc()) {
   $row["purchase_price"] = floatval($row["purchase_price"]);
   $row["sale_price"]     = floatval($row["sale_price"]);
   $row["tax_pct"]        = floatval($row["tax_pct"]);
+  foreach (["master_mrp", "master_sale_price", "master_purchase_price", "master_tax_pct"] as $k) {
+    $row[$k] = $row[$k] !== null ? floatval($row[$k]) : null;
+  }
   $row["pack_size"]      = $row["pack_size"]      !== null ? floatval($row["pack_size"])      : null;
   $row["bag_sale_price"] = $row["bag_sale_price"] !== null ? floatval($row["bag_sale_price"]) : null;
   $row["is_expired"]     = intval($row["is_expired"]);

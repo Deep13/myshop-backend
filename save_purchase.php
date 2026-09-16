@@ -7,6 +7,7 @@ if ($_SERVER["REQUEST_METHOD"] === "OPTIONS") { http_response_code(200); exit; }
 if ($_SERVER["REQUEST_METHOD"] !== "POST") { http_response_code(405); echo json_encode(["status"=>"error","message"=>"Method not allowed"]); exit; }
 
 include "db.php";
+include "item_master_sync.php";
 
 function num($v){if($v===null)return 0;if(is_numeric($v))return floatval($v);$s=trim((string)$v);if($s==="")return 0;$s=str_replace([",","₹","Rs.","INR"],"",$s);$s=preg_replace('/[^0-9.]/','',  $s);return is_numeric($s)?floatval($s):0;}
 function strv($v){return trim((string)($v??""));}
@@ -77,14 +78,7 @@ try {
   $stmtH->close();
 
   // 2) Insert items + update inventory
-  $stmtFindItem = $conn->prepare("SELECT id, category, pack_size FROM items WHERE code=? LIMIT 1");
-  // For Rice items, refresh the items master with latest computed prices.
-  // Formula matches frontend (AddPurchase/AddSales/ItemDetail):
-  //   sale_price (per kg) = ⌈(pp + delivery) / pack + kgMarkup⌉
-  //   bag_sale_price       = ⌈pp + delivery + bagMarkup⌉
-  //   mrp (per bag)        = sale_price × pack_size
-  $stmtUpdateMaster = $conn->prepare("UPDATE items SET sale_price=?, bag_sale_price=?, mrp=?, purchase_price=? WHERE id=? LIMIT 1");
-  $DELIVERY = 13; $KG_MARKUP = 5; $BAG_MARKUP = 50;
+  $stmtFindItem = $conn->prepare("SELECT id FROM items WHERE code=? LIMIT 1");
   // Add free_qty column if not exists
   $conn->query("ALTER TABLE purchase_bill_items ADD COLUMN IF NOT EXISTS free_qty DECIMAL(12,2) NOT NULL DEFAULT 0 AFTER qty");
 
@@ -125,17 +119,12 @@ try {
     if ($qty <= 0) continue;
 
     // Validate item exists in master (item_id required)
-    $itemId = 0; $itemCategory = ""; $itemPackSize = 0;
+    $itemId = 0;
     if ($itemCode !== "") {
       $stmtFindItem->bind_param("s", $itemCode);
       $stmtFindItem->execute();
       $resItem = $stmtFindItem->get_result();
-      if ($resItem && $resItem->num_rows > 0) {
-        $itemRow = $resItem->fetch_assoc();
-        $itemId       = intval($itemRow["id"]);
-        $itemCategory = (string) ($itemRow["category"] ?? "");
-        $itemPackSize = floatval($itemRow["pack_size"] ?? 0);
-      }
+      if ($resItem && $resItem->num_rows > 0) $itemId = intval($resItem->fetch_assoc()["id"]);
     }
     if ($itemId === 0) throw new Exception("Item '".$itemName."' not found in item master. All items must be from master.");
 
@@ -155,20 +144,13 @@ try {
     );
     if (!$stmtInv->execute()) throw new Exception("Inventory update failed: ".$stmtInv->error);
 
-    // For Rice items, refresh the items master with the latest computed prices.
-    if (preg_match('/^Rice\b/i', $itemCategory) && $itemPackSize > 0 && $purchasePrice > 0) {
-      $newSalePerKg = ceil(($purchasePrice + $DELIVERY) / $itemPackSize + $KG_MARKUP);
-      $newBagPrice  = ceil($purchasePrice + $DELIVERY + $BAG_MARKUP);
-      $newMrpBag    = $newSalePerKg * $itemPackSize;
-      $stmtUpdateMaster->bind_param("ddddi", $newSalePerKg, $newBagPrice, $newMrpBag, $purchasePrice, $itemId);
-      $stmtUpdateMaster->execute();
-    }
+    sync_item_master($conn, $itemId, $purchaseId, $billDate, $billType, $gstMode,
+                     $mrp, $purchasePrice, $salePrice, $taxPct);
   }
 
   $stmtFindItem->close();
   $stmtLine->close();
   $stmtInv->close();
-  $stmtUpdateMaster->close();
   $conn->commit();
 
   echo json_encode(["status"=>"success","message"=>"Purchase saved","purchaseId"=>$purchaseId]);
