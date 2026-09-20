@@ -37,8 +37,33 @@ $ppSubquery = "
   ) pp ON pp.item_code = ii.item_code
 ";
 
-// effective per-unit cost (per-kg for rice)
-$costExpr = "(CASE WHEN it.category LIKE 'Rice%' AND it.pack_size > 0
+// ── A packet ("KAJU 250GM") is cut from a bulk item held in kg and is never
+//    purchased in its own right, so its cost is the BULK item's average rate
+//    times the pack weight. Any purchase lines it has are from before the item
+//    was linked and would be stale, so they are deliberately ignored.
+$ppSubquery .= "
+  LEFT JOIN items b ON b.id = it.bulk_item_id
+  LEFT JOIN (
+    SELECT pbi.item_code,
+           SUM(
+             CASE
+               WHEN pb.bill_type = 'NON-GST'   THEN pbi.purchase_price * (1 + COALESCE(itm.tax_pct,0)/100)
+               WHEN pb.gst_mode  = 'exclusive' THEN pbi.purchase_price * (1 + pbi.tax_pct/100)
+               ELSE pbi.purchase_price
+             END * pbi.qty
+           ) / NULLIF(SUM(pbi.qty),0) AS avg_pp
+    FROM purchase_bill_items pbi
+    JOIN purchase_bills pb ON pb.id = pbi.purchase_id
+    LEFT JOIN items itm ON itm.code = pbi.item_code
+    WHERE pbi.purchase_price > 0 AND pbi.qty > 0
+    GROUP BY pbi.item_code
+  ) ppb ON ppb.item_code = b.code
+";
+
+// effective per-unit cost (per-packet for bulk packets, per-kg for rice)
+$costExpr = "(CASE WHEN it.pack_weight > 0 AND b.id IS NOT NULL
+              THEN COALESCE(ppb.avg_pp, b.purchase_price) * it.pack_weight
+              WHEN it.category LIKE 'Rice%' AND it.pack_size > 0
               THEN COALESCE(pp.avg_pp, it.purchase_price) / it.pack_size
               ELSE COALESCE(pp.avg_pp, it.purchase_price) END)";
 
@@ -106,7 +131,8 @@ $stmt2 = $conn->prepare("
   LEFT JOIN items it ON it.id = ii.item_id
   $ppSubquery
   WHERE i.invoice_date BETWEEN ? AND ?
-  GROUP BY it.id, ii.item_code, ii.item_name, it.category, it.pack_size, it.purchase_price, pp.avg_pp
+  GROUP BY it.id, ii.item_code, ii.item_name, it.category, it.pack_size, it.purchase_price, pp.avg_pp,
+           it.pack_weight, b.id, b.purchase_price, ppb.avg_pp
   HAVING cost > 0
   ORDER BY profit DESC
 ");

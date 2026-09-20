@@ -19,7 +19,7 @@ if ($itemId <= 0) {
 
 try {
   // Item + code (sales lines may match by item_id or item_code)
-  $stmt = $conn->prepare("SELECT id, code, name FROM items WHERE id = ? LIMIT 1");
+  $stmt = $conn->prepare("SELECT id, code, name, bulk_item_id, pack_weight FROM items WHERE id = ? LIMIT 1");
   $stmt->bind_param("i", $itemId);
   $stmt->execute();
   $item = $stmt->get_result()->fetch_assoc();
@@ -30,6 +30,12 @@ try {
     exit;
   }
   $code = $item["code"] ?? "";
+
+  // A packet holds no stock of its own — stock and arrival dates live on the
+  // bulk item it is cut from. Sales stay on the packet: those are real.
+  $packWeight = floatval($item["pack_weight"] ?? 0);
+  $bulkId     = !empty($item["bulk_item_id"]) ? intval($item["bulk_item_id"]) : 0;
+  $stockItemId = ($bulkId > 0 && $packWeight > 0) ? $bulkId : $itemId;
 
   // Current stock + when the oldest still-live batch arrived.
   // Arrival = purchase bill date when linked, else the inventory row's created_at.
@@ -44,10 +50,15 @@ try {
     LEFT JOIN purchase_bills pb ON pb.id = inv.purchase_bill_id
     WHERE inv.item_id = ?
   ");
-  $stmt->bind_param("i", $itemId);
+  $stmt->bind_param("i", $stockItemId);
   $stmt->execute();
   $stock = $stmt->get_result()->fetch_assoc();
   $stmt->close();
+  // Report a packet's stock as whole packs the bulk item can still yield.
+  $bulkStockKg = floatval($stock["total_stock"] ?? 0);
+  if ($stockItemId !== $itemId) {
+    $stock["total_stock"] = floor($bulkStockKg / $packWeight);
+  }
 
   // Sales recency + 30-day velocity (match by item_id OR item_code for old rows)
   $stmt = $conn->prepare("
@@ -70,7 +81,13 @@ try {
     JOIN purchase_bills pb ON pb.id = pbi.purchase_id
     WHERE pbi.item_id = ? OR (pbi.item_code <> '' AND pbi.item_code = ?)
   ");
-  $stmt->bind_param("is", $itemId, $code);
+  // A packet is never purchased directly — ask the bulk item when it was last bought.
+  $purchCode = $code;
+  if ($stockItemId !== $itemId) {
+    $rb = $conn->query("SELECT code FROM items WHERE id=$stockItemId LIMIT 1");
+    if ($rb && $rb->num_rows > 0) $purchCode = $rb->fetch_assoc()["code"];
+  }
+  $stmt->bind_param("is", $stockItemId, $purchCode);
   $stmt->execute();
   $purch = $stmt->get_result()->fetch_assoc();
   $stmt->close();
@@ -103,6 +120,10 @@ try {
     "data" => [
       "item_id"              => intval($item["id"]),
       "total_stock"          => $totalStock,
+      "stock_unit"           => $stockItemId !== $itemId ? "packs" : "units",
+      "bulk_item_id"         => $stockItemId !== $itemId ? $stockItemId : null,
+      "bulk_stock_kg"        => $stockItemId !== $itemId ? round($bulkStockKg, 3) : null,
+      "pack_weight"          => $stockItemId !== $itemId ? $packWeight : null,
       "oldest_live_arrival"  => $oldestArrival,
       "newest_live_arrival"  => $stock["newest_live_arrival"],
       "days_in_stock"        => $daysInStock,

@@ -79,6 +79,10 @@ try {
 
   // 2) Insert items + update inventory
   $stmtFindItem = $conn->prepare("SELECT id FROM items WHERE code=? LIMIT 1");
+  $stmtPackGuard = $conn->prepare("
+    SELECT b.name AS bulk_name FROM items p JOIN items b ON b.id = p.bulk_item_id
+    WHERE p.id = ? AND p.pack_weight > 0 LIMIT 1
+  ");
   // Add free_qty column if not exists
   $conn->query("ALTER TABLE purchase_bill_items ADD COLUMN IF NOT EXISTS free_qty DECIMAL(12,2) NOT NULL DEFAULT 0 AFTER qty");
 
@@ -128,6 +132,13 @@ try {
     }
     if ($itemId === 0) throw new Exception("Item '".$itemName."' not found in item master. All items must be from master.");
 
+    // Packets are cut from bulk stock — the purchase belongs on the bulk item.
+    $stmtPackGuard->bind_param("i", $itemId);
+    $stmtPackGuard->execute();
+    if ($packRow = $stmtPackGuard->get_result()->fetch_assoc()) {
+      throw new Exception("'".$itemName."' is a packet. Record this purchase against '".$packRow["bulk_name"]."' instead.");
+    }
+
     // Insert purchase line
     // 15 params: i i s s s s s d d d d s d d i
     // purchase_id, item_id, item_name, item_code, hsn, batch_no, exp_date,
@@ -149,6 +160,7 @@ try {
   }
 
   $stmtFindItem->close();
+  $stmtPackGuard->close();
   $stmtLine->close();
   $stmtInv->close();
   $conn->commit();

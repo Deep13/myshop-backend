@@ -111,6 +111,10 @@ try {
   $stmtDelItems->close();
 
   $stmtFindItem = $conn->prepare("SELECT id FROM items WHERE code=? LIMIT 1");
+  $stmtPackGuard = $conn->prepare("
+    SELECT b.name AS bulk_name FROM items p JOIN items b ON b.id = p.bulk_item_id
+    WHERE p.id = ? AND p.pack_weight > 0 LIMIT 1
+  ");
   $stmtLine = $conn->prepare("
     INSERT INTO purchase_bill_items
       (purchase_id,item_id,item_name,item_code,hsn,batch_no,exp_date,mrp,qty,free_qty,purchase_price,sale_price,discount,tax_pct,amount,gst_flag)
@@ -143,6 +147,13 @@ try {
     }
     if ($itemId === 0) throw new Exception("Item '".$itemName."' not found in item master.");
 
+    // Packets are cut from bulk stock — the purchase belongs on the bulk item.
+    $stmtPackGuard->bind_param("i", $itemId);
+    $stmtPackGuard->execute();
+    if ($packRow = $stmtPackGuard->get_result()->fetch_assoc()) {
+      throw new Exception("'".$itemName."' is a packet. Record this purchase against '".$packRow["bulk_name"]."' instead.");
+    }
+
     $stmtLine->bind_param("iisssssdddddsddi",$purchaseId,$itemId,$itemName,$itemCode,$hsn,$batchNo,$expDate,$mrp,$qty,$freeQty,$purchasePrice,$salePrice,$discount,$taxPct,$amount,$gstFlag);
     if (!$stmtLine->execute()) throw new Exception("Insert item failed: ".$stmtLine->error);
 
@@ -159,7 +170,7 @@ try {
                      $mrp, $purchasePrice, $salePrice, $taxPct);
   }
 
-  $stmtFindItem->close(); $stmtLine->close();
+  $stmtFindItem->close(); $stmtPackGuard->close(); $stmtLine->close();
   if ($stmtInv) $stmtInv->close();
 
   // 4) Replace payments

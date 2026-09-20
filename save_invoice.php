@@ -8,6 +8,7 @@ header("Access-Control-Max-Age: 86400");
 if ($_SERVER["REQUEST_METHOD"] === "OPTIONS") { http_response_code(200); exit; }
 
 include "db.php";
+include "bulk_stock.php";
 
 $data = json_decode(file_get_contents("php://input"), true);
 if (!$data) { http_response_code(400); echo json_encode(["status"=>"error","message"=>"Invalid JSON"]); exit; }
@@ -175,7 +176,23 @@ try {
       }
     }
 
-    // Insert invoice line
+    // Packet items hold no stock of their own — the sale comes off the bulk item
+    // in kg. Deduct first so the line can record the batch it actually came from.
+    $pack = ($invExists && $itemId > 0) ? pack_info($conn, $itemId) : null;
+    if ($pack) {
+      // A packet has no inventory row, so gst_flag comes from the item itself.
+      $rgp = $conn->query("SELECT is_primary FROM items WHERE id=$itemId LIMIT 1");
+      if ($rgp && $rgp->num_rows > 0) $gstFlag = intval($rgp->fetch_assoc()["is_primary"]);
+    }
+    if ($pack && $qty > 0) {
+      $consumed = deduct_bulk_stock($conn, $pack["bulk_item_id"], $qty * $pack["pack_weight"]);
+      if (count($consumed) > 0) {
+        $batch   = (string) $consumed[0]["batch_no"];
+        $expDate = $consumed[0]["exp_date"];
+      }
+    }
+
+    // Insert invoice line — item_id stays the PACKET, so sales report per packet
     // 14 params: i i s s s s s d d d s d d i
     // invoice_id, item_id, item_name, item_code, hsn, batch_no, exp_date,
     // mrp, qty, price, discount, tax, amount, gst_flag
@@ -185,8 +202,8 @@ try {
     );
     if (!$stmtItem->execute()) throw new Exception("Failed to insert item: " . $stmtItem->error);
 
-    // Deduct from inventory
-    if ($invExists && $stmtDeduct && $itemId > 0 && $qty > 0) {
+    // Deduct from inventory (ordinary items — packets were handled above)
+    if (!$pack && $invExists && $stmtDeduct && $itemId > 0 && $qty > 0) {
       $stmtDeduct->bind_param("dis", $qty, $itemId, $batch);
       $stmtDeduct->execute();
     }

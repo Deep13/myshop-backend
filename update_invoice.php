@@ -6,6 +6,7 @@ header("Access-Control-Allow-Headers: Content-Type");
 if ($_SERVER["REQUEST_METHOD"] === "OPTIONS") { http_response_code(200); exit; }
 
 include "db.php";
+include "bulk_stock.php";
 
 $data = json_decode(file_get_contents("php://input"), true);
 if (!$data) { http_response_code(400); echo json_encode(["status"=>"error","message"=>"Invalid JSON"]); exit; }
@@ -67,7 +68,8 @@ try {
   // 1) Snapshot the old line items keyed by (item_id, batch_no) so we can
   //    apply the NET delta to inventory at the end (instead of restore-then-deduct,
   //    which touched every row regardless of change).
-  $oldByKey = []; // key = item_id|batch_no => qty
+  $oldByKey  = []; // key = item_id|batch_no => qty
+  $oldPackKg = []; // bulk_item_id => kg (packet lines)
   if ($invExists) {
     // Resolve item_id from item_code when the stored item_id is NULL
     $stmtOldItems = $conn->prepare("SELECT COALESCE(item_id, 0) AS item_id, COALESCE(item_code,'') AS item_code, COALESCE(batch_no,'') AS batch_no, qty FROM invoice_items WHERE invoice_id = ?");
@@ -84,6 +86,12 @@ try {
         if ($rl->num_rows > 0) $iid = intval($rl->fetch_assoc()["id"]);
       }
       if ($iid <= 0) continue;
+      // Packets are tracked in kg against their bulk item, not by batch.
+      if ($pk = pack_info($conn, $iid)) {
+        $bid = $pk["bulk_item_id"];
+        $oldPackKg[$bid] = ($oldPackKg[$bid] ?? 0) + floatval($oldRow["qty"]) * $pk["pack_weight"];
+        continue;
+      }
       $key = $iid . "|" . $oldRow["batch_no"];
       $oldByKey[$key] = ($oldByKey[$key] ?? 0) + floatval($oldRow["qty"]);
     }
@@ -124,7 +132,8 @@ try {
 
   // We no longer deduct in the per-item loop. Instead we collect the new qtys per
   // (item_id, batch_no) and apply only the NET delta vs the old snapshot at the end.
-  $newByKey = []; // key = item_id|batch_no => qty
+  $newByKey  = []; // key = item_id|batch_no => qty
+  $newPackKg = []; // bulk_item_id => kg (packet lines)
 
   foreach ($rows as $r) {
     $itemName = trim($r["itemName"] ?? ""); if ($itemName === "") continue;
@@ -170,8 +179,13 @@ try {
 
     // Accumulate the new qty for net-delta application below
     if ($invExists && $itemId2 > 0 && $qty > 0) {
-      $key = $itemId2 . "|" . $batchNo;
-      $newByKey[$key] = ($newByKey[$key] ?? 0) + $qty;
+      if ($pk = pack_info($conn, $itemId2)) {
+        $bid = $pk["bulk_item_id"];
+        $newPackKg[$bid] = ($newPackKg[$bid] ?? 0) + $qty * $pk["pack_weight"];
+      } else {
+        $key = $itemId2 . "|" . $batchNo;
+        $newByKey[$key] = ($newByKey[$key] ?? 0) + $qty;
+      }
     }
   }
   $stmtItem->close();
@@ -190,6 +204,14 @@ try {
       $stmtAdj->execute();
     }
     $stmtAdj->close();
+
+    // Packet lines: apply the net kg delta against each bulk item.
+    foreach (array_unique(array_merge(array_keys($oldPackKg), array_keys($newPackKg))) as $bulkId) {
+      $deltaKg = round(($newPackKg[$bulkId] ?? 0) - ($oldPackKg[$bulkId] ?? 0), 3);
+      if (abs($deltaKg) < 0.0005) continue;
+      if ($deltaKg > 0) deduct_bulk_stock($conn, intval($bulkId), $deltaKg);
+      else              restore_bulk_stock($conn, intval($bulkId), -$deltaKg);
+    }
   }
 
   // 5) Replace payments

@@ -42,12 +42,15 @@ function sync_item_master($conn, $itemId, $purchaseId, $billDate, $billType, $gs
   if ($itemId <= 0) return;
   if (!is_latest_purchase($conn, $itemId, $purchaseId, $billDate)) return;
 
-  $stmt = $conn->prepare("SELECT category, pack_size, tax_pct FROM items WHERE id=? LIMIT 1");
+  $stmt = $conn->prepare("SELECT category, pack_size, tax_pct, bulk_item_id FROM items WHERE id=? LIMIT 1");
   $stmt->bind_param("i", $itemId);
   $stmt->execute();
   $item = $stmt->get_result()->fetch_assoc();
   $stmt->close();
   if (!$item) return;
+  // A packet is never purchased in its own right (save_purchase.php rejects it),
+  // and its prices are set by hand. Nothing here may overwrite them.
+  if (!empty($item["bulk_item_id"])) return;
 
   $isGstBill = ($billType === "GST");
   $packSize  = floatval($item["pack_size"] ?? 0);
@@ -79,5 +82,22 @@ function sync_item_master($conn, $itemId, $purchaseId, $billDate, $billType, $gs
   $stmt = $conn->prepare("UPDATE items SET " . implode(", ", $sets) . " WHERE id=? LIMIT 1");
   $stmt->bind_param($types, ...$vals);
   if (!$stmt->execute()) throw new Exception("Item master update failed: " . $stmt->error);
+  $stmt->close();
+
+  sync_pack_costs($conn, $itemId, $purchasePrice, $billType, $gstMode, $taxPct, floatval($item["tax_pct"] ?? 0));
+}
+
+// If this item is a bulk item, restate the cost of every packet cut from it
+// (cost per packet = cost per kg x pack weight). Selling prices, MRP and GST of a
+// packet are set by hand and must never be overwritten here.
+function sync_pack_costs($conn, $bulkItemId, $purchasePrice, $billType, $gstMode, $lineTax, $masterTax) {
+  if ($purchasePrice <= 0) return;
+  $perKg = effective_purchase_price($purchasePrice, $billType, $gstMode, $lineTax, $masterTax);
+  $stmt = $conn->prepare("
+    UPDATE items SET purchase_price = ROUND(? * pack_weight, 2)
+    WHERE bulk_item_id = ? AND pack_weight > 0
+  ");
+  $stmt->bind_param("di", $perKg, $bulkItemId);
+  if (!$stmt->execute()) throw new Exception("Packet cost update failed: " . $stmt->error);
   $stmt->close();
 }

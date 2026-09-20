@@ -41,6 +41,10 @@ $bagSalePrice = isset($body["bagSalePrice"]) ? num($body["bagSalePrice"]) : null
 if ($packSize !== null && $packSize <= 0)         $packSize = null;
 if ($bagSalePrice !== null && $bagSalePrice <= 0) $bagSalePrice = null;
 $is_primary = !empty($body["is_primary"]) ? 1 : 0;
+$bulkItemId = isset($body["bulkItemId"]) ? intval($body["bulkItemId"]) : null;
+$packWeight = isset($body["packWeight"]) ? num($body["packWeight"]) : null;
+if ($bulkItemId !== null && $bulkItemId <= 0) $bulkItemId = null;
+if ($packWeight !== null && $packWeight <= 0) $packWeight = null;
 
 if ($id <= 0) {
   http_response_code(400);
@@ -67,11 +71,60 @@ if ($stmtC->get_result()->num_rows > 0) {
 }
 $stmtC->close();
 
+// ── Bulk/packet link ────────────────────────────────────────────────────────
+// A packet needs both a bulk item and a weight; one without the other is
+// meaningless. The bulk item must exist, must not be this item, and must not be
+// a packet itself (one level only). Rice bag-packs use pack_size and are a
+// separate mechanism — an item may not be both, or the cost formulas collide.
+if (($bulkItemId === null) !== ($packWeight === null)) {
+  http_response_code(400);
+  echo json_encode(["status"=>"error","message"=>"A packet needs both a bulk item and a pack weight"]);
+  exit;
+}
+if ($bulkItemId !== null) {
+  if ($bulkItemId === $id) {
+    http_response_code(400);
+    echo json_encode(["status"=>"error","message"=>"An item cannot be its own bulk item"]);
+    exit;
+  }
+  $stmtB = $conn->prepare("SELECT bulk_item_id FROM items WHERE id=? LIMIT 1");
+  $stmtB->bind_param("i", $bulkItemId);
+  $stmtB->execute();
+  $bRow = $stmtB->get_result()->fetch_assoc();
+  $stmtB->close();
+  if (!$bRow) {
+    http_response_code(400);
+    echo json_encode(["status"=>"error","message"=>"Bulk item not found"]);
+    exit;
+  }
+  if (!empty($bRow["bulk_item_id"])) {
+    http_response_code(400);
+    echo json_encode(["status"=>"error","message"=>"That item is itself a packet — pick the bulk item it comes from"]);
+    exit;
+  }
+  if (preg_match('/^Rice\b/i', $category) && $packSize !== null) {
+    http_response_code(400);
+    echo json_encode(["status"=>"error","message"=>"A Rice bag-pack item cannot also be a packet"]);
+    exit;
+  }
+  // Packets must not hold stock of their own — they are cut from the bulk item.
+  $stmtS = $conn->prepare("SELECT COALESCE(SUM(current_qty),0) AS qty FROM inventory WHERE item_id=?");
+  $stmtS->bind_param("i", $id);
+  $stmtS->execute();
+  $held = floatval($stmtS->get_result()->fetch_assoc()["qty"]);
+  $stmtS->close();
+  if ($held > 0.0005) {
+    http_response_code(400);
+    echo json_encode(["status"=>"error","message"=>"This item still holds ".$held." in stock. Move it to the bulk item before linking."]);
+    exit;
+  }
+}
+
 $stmt = $conn->prepare("
-  UPDATE items SET name=?, code=?, hsn=?, category=?, mrp=?, sale_price=?, pack_size=?, bag_sale_price=?, purchase_price=?, tax_pct=?, is_primary=?
+  UPDATE items SET name=?, code=?, hsn=?, category=?, mrp=?, sale_price=?, pack_size=?, bag_sale_price=?, purchase_price=?, tax_pct=?, is_primary=?, bulk_item_id=?, pack_weight=?
   WHERE id=?
 ");
-$stmt->bind_param("ssssddddddii", $name, $code, $hsn, $category, $mrp, $salePrice, $packSize, $bagSalePrice, $purchasePrice, $tax, $is_primary, $id);
+$stmt->bind_param("ssssddddddiidi", $name, $code, $hsn, $category, $mrp, $salePrice, $packSize, $bagSalePrice, $purchasePrice, $tax, $is_primary, $bulkItemId, $packWeight, $id);
 
 if (!$stmt->execute()) {
   http_response_code(500);
