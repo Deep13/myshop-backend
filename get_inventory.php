@@ -71,7 +71,7 @@ $sql = "
     NULL AS bulk_item_id,
     NULL AS pack_weight,
     0    AS is_pack,
-    EXISTS(SELECT 1 FROM items c WHERE c.bulk_item_id = it.id) AS is_bulk
+    it.is_bulk      AS is_bulk
   FROM inventory inv
   JOIN items it ON it.id = inv.item_id
   LEFT JOIN purchase_bills pb ON pb.id = inv.purchase_bill_id

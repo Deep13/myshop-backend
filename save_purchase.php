@@ -7,7 +7,7 @@ if ($_SERVER["REQUEST_METHOD"] === "OPTIONS") { http_response_code(200); exit; }
 if ($_SERVER["REQUEST_METHOD"] !== "POST") { http_response_code(405); echo json_encode(["status"=>"error","message"=>"Method not allowed"]); exit; }
 
 include "db.php";
-include "item_master_sync.php";
+require_once __DIR__ . "/item_master_sync.php";
 
 function num($v){if($v===null)return 0;if(is_numeric($v))return floatval($v);$s=trim((string)$v);if($s==="")return 0;$s=str_replace([",","₹","Rs.","INR"],"",$s);$s=preg_replace('/[^0-9.]/','',  $s);return is_numeric($s)?floatval($s):0;}
 function strv($v){return trim((string)($v??""));}

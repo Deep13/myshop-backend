@@ -165,10 +165,37 @@ usort($salesHistory, function($a, $b) {
 // Limit to 200
 $salesHistory = array_slice($salesHistory, 0, 200);
 
+// 5) Bulk items: their pack sizes, and stock in kg. Packs: the bulk item they
+//    are cut from, and how many whole packs it can still yield.
+$bulk = null;
+$bulkKg = function ($id) use ($conn) {
+  $r = $conn->query("SELECT COALESCE(SUM(current_qty),0) AS kg FROM inventory WHERE item_id=" . intval($id));
+  return round(floatval($r->fetch_assoc()["kg"]), 3);
+};
+if (!empty($item["is_bulk"])) {
+  $kg = $bulkKg($itemId);
+  $packs = [];
+  $pr = $conn->query("SELECT id, name, code, pack_weight, mrp, sale_price, purchase_price
+                      FROM items WHERE bulk_item_id = $itemId ORDER BY pack_weight, name");
+  while ($p = $pr->fetch_assoc()) {
+    $w = floatval($p["pack_weight"]);
+    $p["packs_available"] = $w > 0 ? floor($kg / $w + 1e-9) : 0;
+    $packs[] = $p;
+  }
+  $bulk = ["stock_kg" => $kg, "packs" => $packs];
+} elseif (!empty($item["bulk_item_id"])) {
+  $bid = intval($item["bulk_item_id"]);
+  $br = $conn->query("SELECT id, name, code, sale_price, mrp FROM items WHERE id = $bid LIMIT 1")->fetch_assoc();
+  $kg = $bulkKg($bid);
+  $w = floatval($item["pack_weight"]);
+  $bulk = ["cut_from" => $br, "stock_kg" => $kg, "packs_available" => $w > 0 ? floor($kg / $w + 1e-9) : 0];
+}
+
 echo json_encode([
   "status"           => "success",
   "item"             => $item,
   "batches"          => $batches,
   "purchase_history" => $purchaseHistory,
   "sales_history"    => $salesHistory,
+  "bulk"             => $bulk,
 ]);

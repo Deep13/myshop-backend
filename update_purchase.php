@@ -7,7 +7,7 @@ if ($_SERVER["REQUEST_METHOD"] === "OPTIONS") { http_response_code(200); exit; }
 if ($_SERVER["REQUEST_METHOD"] !== "POST") { http_response_code(405); echo json_encode(["status"=>"error","message"=>"Method not allowed"]); exit; }
 
 include "db.php";
-include "item_master_sync.php";
+require_once __DIR__ . "/item_master_sync.php";
 
 function strv($v){return trim((string)($v??""));}
 function nullIfEmpty($s){$s=strv($s);return $s===""?null:$s;}

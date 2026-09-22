@@ -13,10 +13,10 @@ if ($limit <= 0 || $limit > 10000) $limit = 10000;
 
 if ($q !== "") {
   $like  = "%" . $q . "%";
-  $stmt  = $conn->prepare("SELECT id,name,code,hsn,category,mrp,sale_price,pack_size,bag_sale_price,purchase_price,tax_pct,is_primary,bulk_item_id,pack_weight,(SELECT COUNT(*) FROM items c WHERE c.bulk_item_id = items.id) AS pack_count FROM items WHERE name LIKE ? OR code LIKE ? OR hsn LIKE ? ORDER BY name ASC LIMIT ?");
+  $stmt  = $conn->prepare("SELECT id,name,code,hsn,category,mrp,sale_price,pack_size,bag_sale_price,purchase_price,tax_pct,is_primary,bulk_item_id,pack_weight,is_bulk FROM items WHERE name LIKE ? OR code LIKE ? OR hsn LIKE ? ORDER BY name ASC LIMIT ?");
   $stmt->bind_param("sssi", $like, $like, $like, $limit);
 } else {
-  $stmt = $conn->prepare("SELECT id,name,code,hsn,category,mrp,sale_price,pack_size,bag_sale_price,purchase_price,tax_pct,is_primary,bulk_item_id,pack_weight,(SELECT COUNT(*) FROM items c WHERE c.bulk_item_id = items.id) AS pack_count FROM items ORDER BY name ASC LIMIT ?");
+  $stmt = $conn->prepare("SELECT id,name,code,hsn,category,mrp,sale_price,pack_size,bag_sale_price,purchase_price,tax_pct,is_primary,bulk_item_id,pack_weight,is_bulk FROM items ORDER BY name ASC LIMIT ?");
   $stmt->bind_param("i", $limit);
 }
 
@@ -39,7 +39,7 @@ while ($row = $res->fetch_assoc()) {
     "is_primary"    => intval($row["is_primary"]),
     "bulkItemId"    => $row["bulk_item_id"] !== null ? intval($row["bulk_item_id"]) : null,
     "packWeight"    => $row["pack_weight"]  !== null ? floatval($row["pack_weight"]) : null,
-    "isBulk"        => intval($row["pack_count"]) > 0 ? 1 : 0,
+    "isBulk"        => intval($row["is_bulk"]),
   ];
 }
 $stmt->close();

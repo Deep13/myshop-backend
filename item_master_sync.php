@@ -12,6 +12,8 @@
 //   tax_pct          taken from GST bills only (NON-GST lines always carry 0)
 // Rice keeps its formula-driven pricing, based on the raw bill rate.
 
+require_once __DIR__ . "/bulk_stock.php";
+
 const RICE_DELIVERY   = 13;
 const RICE_KG_MARKUP  = 5;
 const RICE_BAG_MARKUP = 50;
@@ -48,8 +50,8 @@ function sync_item_master($conn, $itemId, $purchaseId, $billDate, $billType, $gs
   $item = $stmt->get_result()->fetch_assoc();
   $stmt->close();
   if (!$item) return;
-  // A packet is never purchased in its own right (save_purchase.php rejects it),
-  // and its prices are set by hand. Nothing here may overwrite them.
+  // A packet is never purchased in its own right (save_purchase.php rejects it);
+  // its prices come from its bulk item via reprice_packs() below.
   if (!empty($item["bulk_item_id"])) return;
 
   $isGstBill = ($billType === "GST");
@@ -84,20 +86,12 @@ function sync_item_master($conn, $itemId, $purchaseId, $billDate, $billType, $gs
   if (!$stmt->execute()) throw new Exception("Item master update failed: " . $stmt->error);
   $stmt->close();
 
-  sync_pack_costs($conn, $itemId, $purchasePrice, $billType, $gstMode, $taxPct, floatval($item["tax_pct"] ?? 0));
-}
-
-// If this item is a bulk item, restate the cost of every packet cut from it
-// (cost per packet = cost per kg x pack weight). Selling prices, MRP and GST of a
-// packet are set by hand and must never be overwritten here.
-function sync_pack_costs($conn, $bulkItemId, $purchasePrice, $billType, $gstMode, $lineTax, $masterTax) {
-  if ($purchasePrice <= 0) return;
-  $perKg = effective_purchase_price($purchasePrice, $billType, $gstMode, $lineTax, $masterTax);
-  $stmt = $conn->prepare("
-    UPDATE items SET purchase_price = ROUND(? * pack_weight, 2)
-    WHERE bulk_item_id = ? AND pack_weight > 0
-  ");
-  $stmt->bind_param("di", $perKg, $bulkItemId);
-  if (!$stmt->execute()) throw new Exception("Packet cost update failed: " . $stmt->error);
-  $stmt->close();
+  // A bulk item's rates are per kg; the latest bill reprices every pack cut from
+  // it, overwriting hand edits — but only for the prices the bill actually
+  // carried. No-op for ordinary items (nothing points at them).
+  $moved = [];
+  if ($purchasePrice > 0) $moved[] = "cost";
+  if ($mrp > 0)           $moved[] = "mrp";
+  if ($salePrice > 0)     $moved[] = "sale";
+  if ($moved) reprice_packs($conn, $itemId, 0, $moved);
 }
