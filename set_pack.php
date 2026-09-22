@@ -5,6 +5,7 @@
 //   { "action": "create",     "bulkItemId": 5725, "name": "BADAM 250G", "code": "…", "packWeight": 0.25 }
 //   { "action": "connect",    "bulkItemId": 5725, "itemId": 5474, "packWeight": 0.25 }
 //   { "action": "disconnect", "itemId": 5474 }
+//   { "action": "setStock",   "bulkItemId": 5725, "kg": 10.5 }
 //
 // create     — a new barcode for a new size. Inherits the bulk item's category,
 //              HSN and GST; priced from its per-kg rates.
@@ -12,6 +13,10 @@
 //              holds moves onto the bulk item as kg (it is the same goods).
 // disconnect — makes the item an ordinary item again. It holds no stock (packs
 //              never do), so there is nothing to move back.
+// setStock   — sets the bulk item's total stock to a counted figure in kg. A
+//              lower count comes off the batches soonest-expiry first, exactly
+//              as sales do; a higher one goes into a dated "ADJ" batch at the
+//              bulk item's cost, so no purchase bill is altered.
 header("Content-Type: application/json; charset=UTF-8");
 header("Access-Control-Allow-Origin: *");
 header("Access-Control-Allow-Methods: POST, OPTIONS");
@@ -40,7 +45,7 @@ $bulkId     = intval($body["bulkItemId"] ?? 0);
 $itemId     = intval($body["itemId"] ?? 0);
 $packWeight = round(floatval($body["packWeight"] ?? 0), 3);
 
-if (!in_array($action, ["create", "connect", "disconnect"], true)) fail("Unknown action");
+if (!in_array($action, ["create", "connect", "disconnect", "setStock"], true)) fail("Unknown action");
 
 $conn->begin_transaction();
 try {
@@ -57,10 +62,57 @@ try {
     exit;
   }
 
-  // create / connect: both need a real bulk item and a sensible weight.
+  // Every other action needs a real bulk item.
   $bulk = item_row($conn, $bulkId);
   if (!$bulk) fail("Bulk item not found", 404);
   if (intval($bulk["is_bulk"]) !== 1) fail("'".$bulk["name"]."' is not marked as a bulk item");
+
+  if ($action === "setStock") {
+    if (!isset($body["kg"]) || !is_numeric($body["kg"])) fail("Enter the counted stock in kg");
+    $target = round(floatval($body["kg"]), 3);
+    if ($target < 0 || $target > 100000) fail("Stock must be between 0 and 100000 kg");
+
+    $s = $conn->prepare("SELECT COALESCE(SUM(current_qty), 0) AS kg FROM inventory WHERE item_id = ? FOR UPDATE");
+    $s->bind_param("i", $bulkId);
+    $s->execute();
+    $before = round(floatval($s->get_result()->fetch_assoc()["kg"]), 3);
+    $s->close();
+    $delta = round($target - $before, 3);
+
+    if ($delta < 0) {
+      deduct_bulk_stock($conn, $bulkId, -$delta);
+    } elseif ($delta > 0) {
+      // One adjustment batch per day: top it up if today's already exists.
+      $batch = "ADJ-" . date("Ymd");
+      $s = $conn->prepare("SELECT id FROM inventory WHERE item_id = ? AND batch_no = ? AND purchase_bill_id IS NULL LIMIT 1");
+      $s->bind_param("is", $bulkId, $batch);
+      $s->execute();
+      $adj = $s->get_result()->fetch_assoc();
+      $s->close();
+      if ($adj) {
+        $s = $conn->prepare("UPDATE inventory SET current_qty = current_qty + ?, initial_qty = initial_qty + ? WHERE id = ?");
+        $s->bind_param("ddi", $delta, $delta, $adj["id"]);
+      } else {
+        $cost = floatval($conn->query("SELECT purchase_price FROM items WHERE id = $bulkId")->fetch_assoc()["purchase_price"]);
+        $s = $conn->prepare("
+          INSERT INTO inventory (item_id, purchase_bill_id, batch_no, exp_date, mrp, purchase_price,
+                                 sale_price, tax_pct, gst_flag, initial_qty, current_qty)
+          VALUES (?, NULL, ?, NULL, 0, ?, 0, ?, 1, ?, ?)
+        ");
+        $tax = floatval($bulk["tax_pct"]);
+        $s->bind_param("isdddd", $bulkId, $batch, $cost, $tax, $delta, $delta);
+      }
+      if (!$s->execute()) throw new Exception("Stock adjustment failed: " . $s->error);
+      $s->close();
+    }
+
+    $after = round(floatval($conn->query("SELECT COALESCE(SUM(current_qty),0) AS kg FROM inventory WHERE item_id = $bulkId")->fetch_assoc()["kg"]), 3);
+    $conn->commit();
+    echo json_encode(["status"=>"success","message"=>"Stock set","beforeKg"=>$before,"afterKg"=>$after,"changeKg"=>round($after - $before, 3)]);
+    exit;
+  }
+
+  // create / connect need a sensible weight.
   if ($packWeight <= 0 || $packWeight > 100) fail("Pack weight must be between 0 and 100 kg");
 
   if ($action === "create") {
