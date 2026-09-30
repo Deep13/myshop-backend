@@ -41,6 +41,10 @@ $bagSalePrice = isset($body["bagSalePrice"]) ? num($body["bagSalePrice"]) : null
 if ($packSize !== null && $packSize <= 0)         $packSize = null;
 if ($bagSalePrice !== null && $bagSalePrice <= 0) $bagSalePrice = null;
 $is_primary = !empty($body["is_primary"]) ? 1 : 0;
+// Quantity offer — "buy N for ₹X". Either both are set or the offer is off.
+$offerQty   = intval($body["offerQty"] ?? 0);
+$offerPrice = num($body["offerPrice"] ?? 0);
+if ($offerQty < 2 || $offerPrice <= 0) { $offerQty = 0; $offerPrice = 0.0; }
 // Optional: when absent, the item's bulk switch is left as it is.
 $isBulkIn = array_key_exists("isBulk", $body) ? (!empty($body["isBulk"]) ? 1 : 0) : null;
 
@@ -56,6 +60,21 @@ if ($name === "" || $code === "") {
 }
 
 if ($is_primary == 0) $tax = 0;
+
+// An offer that costs more than buying the same pieces one by one is a typo,
+// not an offer. And it can never take the line above MRP.
+if ($offerQty > 0) {
+  if ($salePrice > 0 && $offerPrice >= $offerQty * $salePrice - 0.005) {
+    http_response_code(400);
+    echo json_encode(["status"=>"error","message"=>"Offer price must be less than $offerQty × sale price (₹".number_format($offerQty * $salePrice, 2).")"]);
+    exit;
+  }
+  if ($mrp > 0 && $offerPrice > $offerQty * $mrp + 0.005) {
+    http_response_code(400);
+    echo json_encode(["status"=>"error","message"=>"Offer price cannot exceed $offerQty × MRP (₹".number_format($offerQty * $mrp, 2).")"]);
+    exit;
+  }
+}
 
 // Check code uniqueness (exclude self)
 $stmtC = $conn->prepare("SELECT id FROM items WHERE code=? AND id!=? LIMIT 1");
@@ -102,10 +121,10 @@ if ($isBulk === 0 && intval($old["packs"]) > 0) {
 }
 
 $stmt = $conn->prepare("
-  UPDATE items SET name=?, code=?, hsn=?, category=?, mrp=?, sale_price=?, pack_size=?, bag_sale_price=?, purchase_price=?, tax_pct=?, is_primary=?, is_bulk=?
+  UPDATE items SET name=?, code=?, hsn=?, category=?, mrp=?, sale_price=?, pack_size=?, bag_sale_price=?, purchase_price=?, tax_pct=?, is_primary=?, is_bulk=?, offer_qty=?, offer_price=?
   WHERE id=?
 ");
-$stmt->bind_param("ssssddddddiii", $name, $code, $hsn, $category, $mrp, $salePrice, $packSize, $bagSalePrice, $purchasePrice, $tax, $is_primary, $isBulk, $id);
+$stmt->bind_param("ssssddddddiiidi", $name, $code, $hsn, $category, $mrp, $salePrice, $packSize, $bagSalePrice, $purchasePrice, $tax, $is_primary, $isBulk, $offerQty, $offerPrice, $id);
 
 if (!$stmt->execute()) {
   http_response_code(500);
@@ -133,5 +152,6 @@ echo json_encode([
     "id" => $id, "name" => $name, "code" => $code, "hsn" => $hsn, "category" => $category,
     "mrp" => $mrp, "salePrice" => $salePrice, "packSize" => $packSize, "bagSalePrice" => $bagSalePrice,
     "purchasePrice" => $purchasePrice, "tax" => $tax, "is_primary" => $is_primary,
+    "offerQty" => $offerQty, "offerPrice" => $offerPrice,
   ]
 ]);

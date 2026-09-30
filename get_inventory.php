@@ -71,7 +71,9 @@ $sql = "
     NULL AS bulk_item_id,
     NULL AS pack_weight,
     0    AS is_pack,
-    it.is_bulk      AS is_bulk
+    it.is_bulk      AS is_bulk,
+    it.offer_qty,
+    it.offer_price
   FROM inventory inv
   JOIN items it ON it.id = inv.item_id
   LEFT JOIN purchase_bills pb ON pb.id = inv.purchase_bill_id
@@ -107,6 +109,8 @@ while ($row = $res->fetch_assoc()) {
   $row["bulk_item_id"]   = $row["bulk_item_id"]   !== null ? intval($row["bulk_item_id"])     : null;
   $row["is_pack"]        = intval($row["is_pack"]);
   $row["is_bulk"]        = intval($row["is_bulk"]);
+  $row["offer_qty"]      = intval($row["offer_qty"]);
+  $row["offer_price"]    = floatval($row["offer_price"]);
   $data[] = $row;
 }
 
@@ -160,6 +164,8 @@ $packSql = "
     p.pack_weight,
     1               AS is_pack,
     0               AS is_bulk,
+    p.offer_qty,
+    p.offer_price,
     COALESCE(agg.stock_kg, 0) AS bulk_stock_kg,
     b.name          AS bulk_item_name
   FROM items p
@@ -206,6 +212,8 @@ while ($row = $pRes->fetch_assoc()) {
   $row["gst_flag"]       = intval($row["gst_flag"]);
   $row["is_pack"]        = 1;
   $row["is_bulk"]        = 0;
+  $row["offer_qty"]      = intval($row["offer_qty"]);
+  $row["offer_price"]    = floatval($row["offer_price"]);
   $row["bulk_stock_kg"]  = floatval($row["bulk_stock_kg"]);
   $data[] = $row;
 }
