@@ -16,7 +16,9 @@ if (!$data) { http_response_code(400); echo json_encode(["status"=>"error","mess
 $invoiceNo    = trim($data["invoiceNo"]    ?? "");
 $invoiceDate  = trim($data["invoiceDate"]  ?? "");
 $customerType = trim($data["customerType"] ?? "Retail");
-$customerName = trim($data["customerName"] ?? "Cash");
+// Trailing punctuation is never part of a name. A backtick or quote fumbled next
+// to Enter would otherwise split one customer into two in every report.
+$customerName = trim(preg_replace('/[`\'"^~]+$/', '', trim($data["customerName"] ?? "Cash")));
 $phone        = trim($data["phone"]        ?? "");
 $customerGstin = trim($data["customerGstin"] ?? "");
 $rows         = $data["rows"]     ?? [];
