@@ -23,6 +23,9 @@ $userId   = intval($data["userId"] ?? ($data["createdBy"] ?? 0));
 
 if ($itemId <= 0) { echo json_encode(["status"=>"error","message"=>"Item is required"]); exit; }
 if ($qty <= 0)    { echo json_encode(["status"=>"error","message"=>"Quantity must be > 0"]); exit; }
+// Nothing this shop stocks comes in six-figure counts, in units or in kilos.
+// A mis-keyed quantity once put ten million bottles of Campa Cola on the books.
+if ($qty > 100000) { http_response_code(400); echo json_encode(["status"=>"error","message"=>"That quantity looks mis-typed. Enter 100000 or less."]); exit; }
 
 // Verify item exists
 $check = $conn->prepare("SELECT id, name, code FROM items WHERE id=? LIMIT 1");

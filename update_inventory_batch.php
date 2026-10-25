@@ -24,6 +24,14 @@ if ($hasQty && $currentQty < 0) {
   echo json_encode(["status"=>"error","message"=>"current_qty must be 0 or greater"]);
   exit;
 }
+// A ceiling as well as a floor. A mis-keyed quantity once put ten million
+// bottles of Campa Cola on the books and showed the shop as holding 20 crore
+// of stock. Nothing here comes in six-figure counts, in units or in kilos.
+if ($hasQty && $currentQty > 100000) {
+  http_response_code(400);
+  echo json_encode(["status"=>"error","message"=>"That quantity looks mis-typed. Enter 100000 or less."]);
+  exit;
+}
 
 if ($inventoryId <= 0) {
   http_response_code(400);
@@ -31,11 +39,12 @@ if ($inventoryId <= 0) {
   exit;
 }
 
-// Only allow editing rows that aren't linked to a purchase bill. Inventory
-// linked to a purchase has its batch/exp owned by the bill; editing here
-// would silently desync the bill snapshot. The user has to edit the bill
-// itself for those.
-$stmt = $conn->prepare("SELECT id, purchase_bill_id, item_id FROM inventory WHERE id = ? LIMIT 1");
+// The batch NUMBER on a bill-linked row is owned by the bill — changing it
+// here would silently desync the bill snapshot, so it is ignored for those
+// rows and only the bill can change it. Stock and expiry are different: a
+// physical recount and a mis-keyed expiry date are everyday corrections, and
+// they must not require editing a months-old purchase bill to put right.
+$stmt = $conn->prepare("SELECT id, purchase_bill_id, item_id, batch_no FROM inventory WHERE id = ? LIMIT 1");
 $stmt->bind_param("i", $inventoryId);
 $stmt->execute();
 $row = $stmt->get_result()->fetch_assoc();
@@ -46,11 +55,10 @@ if (!$row) {
   echo json_encode(["status"=>"error","message"=>"Inventory row not found"]);
   exit;
 }
-if ($row["purchase_bill_id"] !== null && $row["purchase_bill_id"] !== "") {
-  http_response_code(403);
-  echo json_encode(["status"=>"error","message"=>"Cannot edit a batch that's linked to a purchase bill — edit the bill instead."]);
-  exit;
-}
+// NULL for a bill-linked row, so the UPDATE's COALESCE leaves batch_no exactly
+// as the bill set it — including leaving a NULL as NULL rather than "".
+$billLinked  = ($row["purchase_bill_id"] !== null && $row["purchase_bill_id"] !== "");
+$batchParam  = $billLinked ? null : $batchNo;
 
 if ($hasQty) {
   // Update qty too. initial_qty is bumped along with current_qty when the new
@@ -58,15 +66,15 @@ if ($hasQty) {
   // ceiling sensible. When the new qty is lower we leave initial_qty alone.
   $stmt = $conn->prepare("
     UPDATE inventory
-    SET batch_no = ?, exp_date = ?,
+    SET batch_no = COALESCE(?, batch_no), exp_date = ?,
         current_qty = ?, initial_qty = GREATEST(initial_qty, ?),
         updated_by = NULLIF(?, 0)
     WHERE id = ? LIMIT 1
   ");
-  $stmt->bind_param("ssddii", $batchNo, $expDate, $currentQty, $currentQty, $updatedBy, $inventoryId);
+  $stmt->bind_param("ssddii", $batchParam, $expDate, $currentQty, $currentQty, $updatedBy, $inventoryId);
 } else {
-  $stmt = $conn->prepare("UPDATE inventory SET batch_no = ?, exp_date = ?, updated_by = NULLIF(?, 0) WHERE id = ? LIMIT 1");
-  $stmt->bind_param("ssii", $batchNo, $expDate, $updatedBy, $inventoryId);
+  $stmt = $conn->prepare("UPDATE inventory SET batch_no = COALESCE(?, batch_no), exp_date = ?, updated_by = NULLIF(?, 0) WHERE id = ? LIMIT 1");
+  $stmt->bind_param("ssii", $batchParam, $expDate, $updatedBy, $inventoryId);
 }
 if (!$stmt->execute()) {
   $errno = $conn->errno;
@@ -83,12 +91,16 @@ if (!$stmt->execute()) {
 }
 $stmt->close();
 
+// Report the batch number that was actually stored, not the one that was
+// asked for: on a bill-linked row the request's value is discarded, and a
+// caller that trusted the echo would show a number the database never took.
 echo json_encode([
-  "status"  => "success",
-  "message" => "Batch updated",
-  "data"    => [
+  "status"      => "success",
+  "message"     => "Batch updated",
+  "bill_linked" => $billLinked,
+  "data"        => [
     "id"          => $inventoryId,
-    "batch_no"    => $batchNo,
+    "batch_no"    => $billLinked ? $row["batch_no"] : $batchNo,
     "exp_date"    => $expDate,
     "current_qty" => $hasQty ? $currentQty : null,
   ],
