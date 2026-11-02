@@ -10,7 +10,7 @@ include "db.php";
 $from   = trim($_GET["from"]   ?? "");
 $to     = trim($_GET["to"]     ?? "");
 $userId = intval($_GET["user_id"] ?? 0);
-$status = trim($_GET["status"] ?? ""); // success | failure
+$status = trim($_GET["status"] ?? ""); // success | failure | logout
 $limit  = intval($_GET["limit"] ?? 500);
 if ($limit < 1)    $limit = 1;
 if ($limit > 5000) $limit = 5000;
@@ -34,7 +34,9 @@ if ($userId > 0) {
   $params[] = $userId;
   $types   .= "i";
 }
-if ($status === "success" || $status === "failure") {
+// The screen offers Logout as well; without it here that filter silently
+// returned every row instead of narrowing.
+if ($status === "success" || $status === "failure" || $status === "logout") {
   $where[]  = "ll.status = ?";
   $params[] = $status;
   $types   .= "s";
