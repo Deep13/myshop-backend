@@ -8,6 +8,7 @@ if ($_SERVER["REQUEST_METHOD"] !== "POST") { http_response_code(405); echo json_
 
 include "db.php";
 require_once __DIR__ . "/item_master_sync.php";
+require_once __DIR__ . "/purchase_schema.php";
 
 function strv($v){return trim((string)($v??""));}
 function nullIfEmpty($s){$s=strv($s);return $s===""?null:$s;}
@@ -26,6 +27,9 @@ $billType          = strv($body["billType"] ?? "GST");
 $gstMode           = strv($body["gstMode"] ?? "exclusive");
 $rows              = $body["rows"] ?? [];
 $payments          = $body["payments"] ?? [];
+// appendPayments: the edit screen sends only payments made now; keep the ones
+// already recorded (older clients send the full list, which replaces them).
+$appendPayments    = !empty($body["appendPayments"]);
 $subTotal          = num($body["totals"]["subTotal"] ?? 0);
 $taxTotal          = num($body["totals"]["taxTotal"] ?? 0);
 $grandTotal        = num($body["totals"]["grandTotal"] ?? 0);
@@ -69,6 +73,7 @@ if ($stmtDup->get_result()->num_rows > 0) {
 }
 $stmtDup->close();
 
+ensure_purchase_precision($conn);
 $conn->begin_transaction();
 try {
   // 1) Update header
@@ -173,17 +178,21 @@ try {
   $stmtFindItem->close(); $stmtPackGuard->close(); $stmtLine->close();
   if ($stmtInv) $stmtInv->close();
 
-  // 4) Replace payments
-  $stmtDelPay = $conn->prepare("DELETE FROM purchase_payments WHERE purchase_id=?");
-  $stmtDelPay->bind_param("i", $purchaseId);
-  $stmtDelPay->execute(); $stmtDelPay->close();
+  // 4) Payments: add the new ones, or replace the whole list
+  if (!$appendPayments) {
+    $stmtDelPay = $conn->prepare("DELETE FROM purchase_payments WHERE purchase_id=?");
+    $stmtDelPay->bind_param("i", $purchaseId);
+    $stmtDelPay->execute(); $stmtDelPay->close();
+  }
+  // A payment added while editing is made today, not on the bill date
+  $payDate = $appendPayments ? date("Y-m-d") : $billDate;
 
   if (is_array($payments) && count($payments) > 0) {
     $stmtPay = $conn->prepare("INSERT INTO purchase_payments (distributor_id,purchase_id,pay_date,mode,amount,reference_no,note) VALUES (?,?,?,?,?,'','')");
     foreach ($payments as $p) {
       $mode=strv($p["type"]??"Cash"); $amt=num($p["amount"]??0);
       if ($amt <= 0) continue;
-      $stmtPay->bind_param("iissd",$distributorId,$purchaseId,$billDate,$mode,$amt);
+      $stmtPay->bind_param("iissd",$distributorId,$purchaseId,$payDate,$mode,$amt);
       if (!$stmtPay->execute()) throw new Exception("Insert payment failed: ".$stmtPay->error);
     }
     $stmtPay->close();
