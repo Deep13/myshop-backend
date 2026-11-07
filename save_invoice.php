@@ -9,6 +9,7 @@ if ($_SERVER["REQUEST_METHOD"] === "OPTIONS") { http_response_code(200); exit; }
 
 include "db.php";
 require_once __DIR__ . "/bulk_stock.php";
+require_once __DIR__ . "/batch_stock.php";
 
 $data = json_decode(file_get_contents("php://input"), true);
 if (!$data) { http_response_code(400); echo json_encode(["status"=>"error","message"=>"Invalid JSON"]); exit; }
@@ -123,17 +124,6 @@ try {
     VALUES (?,NULLIF(?,0),?,?,?,?,?,?,?,?,?,?,?,?)
   ");
 
-  // Prepared statement for inventory deduction — match by item_id + batch_no
-  $stmtDeduct = null;
-  if ($invExists) {
-    $stmtDeduct = $conn->prepare("
-      UPDATE inventory
-      SET current_qty = GREATEST(current_qty - ?, 0)
-      WHERE item_id = ? AND batch_no = ?
-      LIMIT 1
-    ");
-  }
-
   // Also need item_id lookup by code
   $stmtItemLookup = $invExists ? $conn->prepare("SELECT id FROM items WHERE code = ? LIMIT 1") : null;
 
@@ -204,14 +194,13 @@ try {
     );
     if (!$stmtItem->execute()) throw new Exception("Failed to insert item: " . $stmtItem->error);
 
-    // Deduct from inventory (ordinary items — packets were handled above)
-    if (!$pack && $invExists && $stmtDeduct && $itemId > 0 && $qty > 0) {
-      $stmtDeduct->bind_param("dis", $qty, $itemId, $batch);
-      $stmtDeduct->execute();
+    // Deduct from inventory (ordinary items — packets were handled above),
+    // starting with the stock row the till picked
+    if (!$pack && $invExists && $itemId > 0 && $qty > 0) {
+      deduct_batch_stock($conn, $itemId, $batch, $qty, $invId);
     }
   }
   $stmtItem->close();
-  if ($stmtDeduct) $stmtDeduct->close();
   if ($stmtItemLookup) $stmtItemLookup->close();
 
   // 3) Insert payments

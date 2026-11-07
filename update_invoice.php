@@ -7,6 +7,7 @@ if ($_SERVER["REQUEST_METHOD"] === "OPTIONS") { http_response_code(200); exit; }
 
 include "db.php";
 require_once __DIR__ . "/bulk_stock.php";
+require_once __DIR__ . "/batch_stock.php";
 
 $data = json_decode(file_get_contents("php://input"), true);
 if (!$data) { http_response_code(400); echo json_encode(["status"=>"error","message"=>"Invalid JSON"]); exit; }
@@ -133,6 +134,7 @@ try {
   // We no longer deduct in the per-item loop. Instead we collect the new qtys per
   // (item_id, batch_no) and apply only the NET delta vs the old snapshot at the end.
   $newByKey  = []; // key = item_id|batch_no => qty
+  $prefByKey = []; // key => the stock row the till picked, taken from first
   $newPackKg = []; // bulk_item_id => kg (packet lines)
 
   foreach ($rows as $r) {
@@ -185,6 +187,7 @@ try {
       } else {
         $key = $itemId2 . "|" . $batchNo;
         $newByKey[$key] = ($newByKey[$key] ?? 0) + $qty;
+        if ($invId2 > 0 && empty($prefByKey[$key])) $prefByKey[$key] = $invId2;
       }
     }
   }
@@ -194,16 +197,15 @@ try {
   // delta > 0 means more sold than before → deduct; delta < 0 means restore.
   if ($invExists) {
     $allKeys = array_unique(array_merge(array_keys($oldByKey), array_keys($newByKey)));
-    $stmtAdj = $conn->prepare("UPDATE inventory SET current_qty = GREATEST(current_qty - ?, 0) WHERE item_id = ? AND batch_no = ? LIMIT 1");
     foreach ($allKeys as $key) {
       $delta = ($newByKey[$key] ?? 0) - ($oldByKey[$key] ?? 0);
       if (abs($delta) < 0.0001) continue; // unchanged batch — leave inventory alone
       [$iidStr, $batch] = explode("|", $key, 2);
       $iid = intval($iidStr);
-      $stmtAdj->bind_param("dis", $delta, $iid, $batch);
-      $stmtAdj->execute();
+      $pref = $prefByKey[$key] ?? 0;
+      if ($delta > 0) deduct_batch_stock($conn, $iid, $batch, $delta, $pref);
+      else            restore_batch_stock($conn, $iid, $batch, -$delta, $pref);
     }
-    $stmtAdj->close();
 
     // Packet lines: apply the net kg delta against each bulk item.
     foreach (array_unique(array_merge(array_keys($oldPackKg), array_keys($newPackKg))) as $bulkId) {
