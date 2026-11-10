@@ -1,1 +1,3 @@
 config.php
+db-backup/*.sql
+db-backup/*.sql.gz

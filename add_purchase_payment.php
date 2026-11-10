@@ -12,139 +12,77 @@ if ($_SERVER["REQUEST_METHOD"] !== "POST") {
 }
 
 include "db.php";
+require_once __DIR__ . "/purchase_payment_lib.php";
 
-function strv($v){ return trim((string)($v ?? "")); }
-function num($v){
-  if ($v === null) return 0;
-  if (is_numeric($v)) return floatval($v);
-  $s = trim((string)$v);
-  if ($s === "") return 0;
-  $s = str_replace([",","₹","Rs.","INR"], "", $s);
-  $s = preg_replace('/[^0-9.]/', '', $s);
-  return is_numeric($s) ? floatval($s) : 0;
-}
-
+// Records payments to a distributor, against one purchase bill or on account.
+// Takes either one payment (payDate, mode, amount, referenceNo, note) or
+// several in "lines" — e.g. part cash, part UPI. All lines are saved
+// together or none are.
 $body = json_decode(file_get_contents("php://input"), true);
-if (!$body) {
-  http_response_code(400);
-  echo json_encode(["status"=>"error","message"=>"Invalid JSON"]);
-  exit;
-}
+if (!$body) pp_json(400, ["status"=>"error","message"=>"Invalid JSON"]);
 
 $distributorId = intval($body["distributorId"] ?? 0);
-$purchaseIdRaw = $body["purchaseId"] ?? null; // may be null
-$payDate       = strv($body["payDate"] ?? "");
-$mode          = strv($body["mode"] ?? "Cash");
-$amount        = num($body["amount"] ?? 0);
-$referenceNo   = strv($body["referenceNo"] ?? "");
-$note          = strv($body["note"] ?? "");
+$purchaseId    = intval($body["purchaseId"] ?? 0);   // 0 = on account, no bill
+$createdBy     = intval($body["createdBy"] ?? 0);
 
-// Normalize purchaseId: allow null
-$purchaseId = null;
-if ($purchaseIdRaw !== null && $purchaseIdRaw !== "" && $purchaseIdRaw !== 0 && $purchaseIdRaw !== "0") {
-  $purchaseId = intval($purchaseIdRaw);
+$rawLines = (isset($body["lines"]) && is_array($body["lines"])) ? $body["lines"] : [$body];
+$lines = [];
+foreach ($rawLines as $raw) {
+  if (!isset($raw["payDate"]) && isset($body["payDate"])) $raw["payDate"] = $body["payDate"];
+  [$line, $err] = pp_clean_line($raw);
+  if ($err) pp_json(400, ["status"=>"error","message"=>$err]);
+  $lines[] = $line;
 }
+if (!$lines) pp_json(400, ["status"=>"error","message"=>"No payment to save"]);
 
-$allowedModes = ["Cash","UPI","Card","Bank","Cheque","Other"];
+// The bill decides the distributor, so the two can't disagree
+if ($purchaseId > 0) {
+  $bill = pp_bill_summary($conn, $purchaseId);
+  if (!$bill) pp_json(404, ["status"=>"error","message"=>"Purchase bill not found"]);
+  if ($distributorId > 0 && $distributorId !== intval($bill["distributor_id"])) {
+    pp_json(400, ["status"=>"error","message"=>"Purchase bill not found for this distributor"]);
+  }
+  $distributorId = intval($bill["distributor_id"]);
+}
+if ($distributorId <= 0) pp_json(400, ["status"=>"error","message"=>"distributorId required"]);
 
-if ($distributorId <= 0) {
-  http_response_code(400);
-  echo json_encode(["status"=>"error","message"=>"distributorId required"]);
-  exit;
-}
-if ($payDate === "") {
-  http_response_code(400);
-  echo json_encode(["status"=>"error","message"=>"payDate required"]);
-  exit;
-}
-if (!in_array($mode, $allowedModes)) {
-  http_response_code(400);
-  echo json_encode(["status"=>"error","message"=>"Invalid mode"]);
-  exit;
-}
-if ($amount <= 0) {
-  http_response_code(400);
-  echo json_encode(["status"=>"error","message"=>"amount must be > 0"]);
-  exit;
-}
-
-// Validate distributor exists
 $stmtD = $conn->prepare("SELECT id FROM distributors WHERE id=? LIMIT 1");
 $stmtD->bind_param("i", $distributorId);
 $stmtD->execute();
-$resD = $stmtD->get_result();
-if ($resD->num_rows === 0) {
-  $stmtD->close();
-  http_response_code(400);
-  echo json_encode(["status"=>"error","message"=>"Distributor not found"]);
-  exit;
-}
+$found = $stmtD->get_result()->num_rows > 0;
 $stmtD->close();
+if (!$found) pp_json(400, ["status"=>"error","message"=>"Distributor not found"]);
 
-// If purchaseId provided, validate purchase belongs to distributor
-if ($purchaseId !== null) {
-  $stmtP = $conn->prepare("SELECT id FROM purchase_bills WHERE id=? AND distributor_id=? LIMIT 1");
-  $stmtP->bind_param("ii", $purchaseId, $distributorId);
-  $stmtP->execute();
-  $resP = $stmtP->get_result();
-  if ($resP->num_rows === 0) {
-    $stmtP->close();
-    http_response_code(400);
-    echo json_encode(["status"=>"error","message"=>"Purchase bill not found for this distributor"]);
-    exit;
-  }
-  $stmtP->close();
-}
+ensure_purchase_payment_audit($conn);
 
-// Insert payment
 $conn->begin_transaction();
-
 try {
-  // Use NULLIF to store purchase_id as NULL if 0
   $stmt = $conn->prepare("
     INSERT INTO purchase_payments
-      (distributor_id, purchase_id, pay_date, mode, amount, reference_no, note)
-    VALUES (?, NULLIF(?,0), ?, ?, ?, ?, ?)
+      (distributor_id, purchase_id, pay_date, mode, amount, reference_no, note, created_by)
+    VALUES (?, NULLIF(?,0), ?, ?, ?, ?, ?, NULLIF(?,0))
   ");
-
-  $pid = ($purchaseId === null) ? 0 : $purchaseId;
-
-  $stmt->bind_param(
-    "iissdss",
-    $distributorId,
-    $pid,
-    $payDate,
-    $mode,
-    $amount,
-    $referenceNo,
-    $note
-  );
-
-  if (!$stmt->execute()) {
-    throw new Exception("Insert payment failed: " . $stmt->error);
+  $ids = [];
+  foreach ($lines as $l) {
+    $stmt->bind_param("iissdssi", $distributorId, $purchaseId, $l["payDate"], $l["mode"], $l["amount"], $l["referenceNo"], $l["note"], $createdBy);
+    if (!$stmt->execute()) throw new Exception("Insert payment failed: " . $stmt->error);
+    $ids[] = $stmt->insert_id;
   }
-
-  $paymentId = $stmt->insert_id;
   $stmt->close();
-
   $conn->commit();
 
   echo json_encode([
     "status" => "success",
-    "message" => "Payment added",
+    "message" => count($ids) === 1 ? "Payment added" : count($ids) . " payments added",
     "data" => [
-      "paymentId" => $paymentId,
+      "paymentId" => $ids[0],
+      "paymentIds" => $ids,
       "distributorId" => $distributorId,
-      "purchaseId" => $purchaseId,
-      "payDate" => $payDate,
-      "mode" => $mode,
-      "amount" => $amount,
-      "referenceNo" => $referenceNo,
-      "note" => $note
-    ]
+      "purchaseId" => $purchaseId ?: null,
+      "bill" => $purchaseId > 0 ? pp_bill_summary($conn, $purchaseId) : null,
+    ],
   ]);
 } catch (Exception $e) {
   $conn->rollback();
-  http_response_code(500);
-  echo json_encode(["status"=>"error","message"=>$e->getMessage()]);
+  pp_json(500, ["status"=>"error","message"=>$e->getMessage()]);
 }

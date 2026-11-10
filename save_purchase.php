@@ -31,6 +31,8 @@ $createdBy         = intval($body["createdBy"] ?? 0);
 $roundOffEnabled   = !empty($body["totals"]["roundOffEnabled"]) ? 1 : 0;
 $roundOffDiff      = num($body["totals"]["roundOffDiff"] ?? 0);
 $roundedGrandTotal = num($body["totals"]["roundedGrandTotal"] ?? $grandTotal);
+$schemeDiscount    = substr(strv($body["totals"]["schemeDiscount"] ?? ""), 0, 20);
+$schemeDiscountVal = num($body["totals"]["schemeDiscountValue"] ?? 0);
 
 if (!in_array($billType, ["GST","NON-GST"])) $billType = "GST";
 $gstFlag = ($billType === "GST") ? 1 : 0;
@@ -64,17 +66,18 @@ if ($stmtDup->get_result()->num_rows > 0) {
 $stmtDup->close();
 
 ensure_purchase_precision($conn);
+ensure_purchase_scheme($conn);
 $conn->begin_transaction();
 try {
   // 1) Insert purchase header
   $stmtH = $conn->prepare("
     INSERT INTO purchase_bills
       (distributor_id, distributor_name, distributor_gstin, bill_no, bill_date, due_date,
-       sub_total, tax_total, grand_total, round_off_enabled, round_off_diff, rounded_grand_total,
+       sub_total, tax_total, grand_total, scheme_discount, scheme_discount_value, round_off_enabled, round_off_diff, rounded_grand_total,
        bill_type, gst_mode, created_by)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
   ");
-  $stmtH->bind_param("isssssdddiddssi", $distributorId,$distributorName,$distributorGstin,$billNo,$billDate,$dueDate,$subTotal,$taxTotal,$grandTotal,$roundOffEnabled,$roundOffDiff,$roundedGrandTotal,$billType,$gstMode,$createdBy);
+  $stmtH->bind_param("isssssdddsdiddssi", $distributorId,$distributorName,$distributorGstin,$billNo,$billDate,$dueDate,$subTotal,$taxTotal,$grandTotal,$schemeDiscount,$schemeDiscountVal,$roundOffEnabled,$roundOffDiff,$roundedGrandTotal,$billType,$gstMode,$createdBy);
   if (!$stmtH->execute()) throw new Exception("Insert header failed: ".$stmtH->error);
   $purchaseId = $stmtH->insert_id;
   $stmtH->close();

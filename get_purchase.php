@@ -12,6 +12,8 @@ if ($_SERVER["REQUEST_METHOD"] !== "GET") {
 }
 
 include "db.php";
+require_once __DIR__ . "/purchase_schema.php";
+ensure_purchase_scheme($conn);
 
 $purchaseId = intval($_GET["id"] ?? 0);
 if ($purchaseId <= 0) {
@@ -33,6 +35,8 @@ $stmtH = $conn->prepare("
     pb.sub_total,
     pb.tax_total,
     pb.grand_total,
+    pb.scheme_discount,
+    pb.scheme_discount_value,
     pb.round_off_enabled,
     pb.round_off_diff,
     pb.rounded_grand_total,

@@ -36,6 +36,8 @@ $grandTotal        = num($body["totals"]["grandTotal"] ?? 0);
 $roundOffEnabled   = !empty($body["totals"]["roundOffEnabled"]) ? 1 : 0;
 $roundOffDiff      = num($body["totals"]["roundOffDiff"] ?? 0);
 $roundedGrandTotal = num($body["totals"]["roundedGrandTotal"] ?? $grandTotal);
+$schemeDiscount    = substr(strv($body["totals"]["schemeDiscount"] ?? ""), 0, 20);
+$schemeDiscountVal = num($body["totals"]["schemeDiscountValue"] ?? 0);
 
 if (!in_array($billType, ["GST","NON-GST"])) $billType = "GST";
 $gstFlag = ($billType === "GST") ? 1 : 0;
@@ -74,17 +76,18 @@ if ($stmtDup->get_result()->num_rows > 0) {
 $stmtDup->close();
 
 ensure_purchase_precision($conn);
+ensure_purchase_scheme($conn);
 $conn->begin_transaction();
 try {
   // 1) Update header
   $stmtH = $conn->prepare("
     UPDATE purchase_bills SET
       distributor_id=?,distributor_name=?,distributor_gstin=?,bill_no=?,bill_date=?,due_date=?,
-      sub_total=?,tax_total=?,grand_total=?,round_off_enabled=?,round_off_diff=?,rounded_grand_total=?,
+      sub_total=?,tax_total=?,grand_total=?,scheme_discount=?,scheme_discount_value=?,round_off_enabled=?,round_off_diff=?,rounded_grand_total=?,
       bill_type=?,gst_mode=?,updated_by=?,updated_at=NOW()
     WHERE id=?
   ");
-  $stmtH->bind_param("isssssdddiddssii", $distributorId,$distributorName,$gstin,$billNo,$billDate,$dueDate,$subTotal,$taxTotal,$grandTotal,$roundOffEnabled,$roundOffDiff,$roundedGrandTotal,$billType,$gstMode,$updatedBy,$purchaseId);
+  $stmtH->bind_param("isssssdddsdiddssii", $distributorId,$distributorName,$gstin,$billNo,$billDate,$dueDate,$subTotal,$taxTotal,$grandTotal,$schemeDiscount,$schemeDiscountVal,$roundOffEnabled,$roundOffDiff,$roundedGrandTotal,$billType,$gstMode,$updatedBy,$purchaseId);
   if (!$stmtH->execute()) throw new Exception("Update header failed: ".$stmtH->error);
   $stmtH->close();
 

@@ -20,7 +20,7 @@ if ($itemId <= 0) {
 
 $stmt = $conn->prepare("
   SELECT pb.id AS bill_id, pb.bill_no, pb.bill_date, pb.distributor_name,
-         pbi.purchase_price, pbi.mrp
+         pbi.purchase_price, pbi.mrp, pbi.qty, pbi.free_qty
   FROM purchase_bill_items pbi
   JOIN purchase_bills pb ON pb.id = pbi.purchase_id
   WHERE pbi.item_id = ? AND pb.id <> ?
